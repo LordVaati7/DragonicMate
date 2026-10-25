@@ -12,6 +12,7 @@ public enum SubmissionOutcome
     OrdinaryFailure,
     QuotaReached,
     AdapterInvalid,
+    OutcomeUnknown,
 }
 
 public enum SubmissionDispatchStatus

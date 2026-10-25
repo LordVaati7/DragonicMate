@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     }
 
     private readonly AppDataPaths _paths;
+    private readonly bool _manualOnly;
     private readonly IAppSettingsStore _settingsStore;
     private readonly IDiagnosticLogger _logger;
     private readonly IPrimaryDisplayCapture _capture;
@@ -59,10 +60,11 @@ public partial class MainWindow : Window
     private bool _capturingHotKey;
     private bool _updatingIdleDelaySelection;
 
-    public MainWindow(AppDataPaths paths)
+    public MainWindow(AppDataPaths paths, bool manualOnly = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
+        _manualOnly = manualOnly;
         _settingsStore = new JsonAppSettingsStore(paths.SettingsFile);
         _logger = new JsonLineDiagnosticLogger(paths.LogsDirectory);
         _capture = new PrimaryDisplayCapture(paths.TemporaryDirectory);
@@ -735,6 +737,12 @@ public partial class MainWindow : Window
         try
         {
             var preparation = await _adapter.PrepareTextAsync(text);
+            await SafeLogAsync(
+                "adapter.role-preparation",
+                preparation.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+                errorCode: preparation.Code,
+                success: preparation.Status == WebAdapterStatus.Succeeded,
+                adapterDiagnostics: preparation.Diagnostics);
             if (!preparation.TextInserted || preparation.Status != WebAdapterStatus.Succeeded)
             {
                 HandleAdapterFailure(preparation.Status, "role-prepare");
@@ -841,7 +849,13 @@ public partial class MainWindow : Window
         _runCancellation?.Cancel();
         _runCancellation?.Dispose();
         _runCancellation = new CancellationTokenSource();
-        _automaticLoopTask = RunAutomaticLoopAsync(_runCancellation.Token);
+        _automaticLoopTask = _manualOnly ? Task.CompletedTask : RunAutomaticLoopAsync(_runCancellation.Token);
+        if (_manualOnly)
+        {
+            AddActivity(T("手动验证模式：不会自动截图或发送。", "Manual validation mode: automatic capture and sending are disabled."));
+            UpdateUi();
+            return;
+        }
         AddActivity(T(
             $"陪玩已开始；网页音频停止且页面空闲稳定 {_settings.ConversationIdleDelaySeconds} 秒后自动发送。",
             $"Companion mode started; automatic capture waits for {_settings.ConversationIdleDelaySeconds} seconds of stable page and web-audio silence."));
@@ -1213,6 +1227,12 @@ public partial class MainWindow : Window
             ? CompanionPrompts.ManualScreenshot(PromptLanguage)
             : CompanionPrompts.AutomaticScreenshot(PromptLanguage);
         var preparation = await _adapter!.PrepareInputAsync(capture.Path, message, cancellationToken);
+        await SafeLogAsync(
+            "adapter.input-preparation",
+            preparation.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+            errorCode: preparation.Code,
+            success: preparation.Status == WebAdapterStatus.Succeeded,
+            adapterDiagnostics: preparation.Diagnostics);
         if (preparation.Status != WebAdapterStatus.Succeeded ||
             !preparation.ImageAdded ||
             !preparation.TextInserted)
@@ -1292,6 +1312,12 @@ public partial class MainWindow : Window
             pendingCreatedAt: pending.PendingCreatedAt,
             attachStartedAt: attachStartedAt);
         var attachment = await _adapter!.PrepareImageAsync(capture.Path, cancellationToken);
+        await SafeLogAsync(
+            "adapter.image-preparation",
+            attachment.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+            errorCode: attachment.Code,
+            success: attachment.Status == WebAdapterStatus.Succeeded,
+            adapterDiagnostics: attachment.Diagnostics);
         if (attachment.Status != WebAdapterStatus.Succeeded || !attachment.ImageAdded)
         {
             return MapAdapterStatus(attachment.Status);
@@ -1318,6 +1344,12 @@ public partial class MainWindow : Window
 
         var message = CompanionPrompts.AutomaticScreenshot(PromptLanguage);
         var text = await _adapter.PrepareTextAsync(message, cancellationToken);
+        await SafeLogAsync(
+            "adapter.text-preparation",
+            text.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+            errorCode: text.Code,
+            success: text.Status == WebAdapterStatus.Succeeded,
+            adapterDiagnostics: text.Diagnostics);
         var textSetAt = DateTimeOffset.UtcNow;
         if (text.Status != WebAdapterStatus.Succeeded || !text.TextInserted)
         {
@@ -1499,6 +1531,7 @@ public partial class MainWindow : Window
 
     private static SubmissionOutcome MapAdapterStatus(WebAdapterStatus status) => status switch
     {
+        WebAdapterStatus.OutcomeUnknown => SubmissionOutcome.OutcomeUnknown,
         WebAdapterStatus.QuotaReached => SubmissionOutcome.QuotaReached,
         WebAdapterStatus.AdapterInvalid => SubmissionOutcome.AdapterInvalid,
         _ => SubmissionOutcome.OrdinaryFailure,
@@ -1523,6 +1556,14 @@ public partial class MainWindow : Window
                 _runCancellation?.Cancel();
                 AddActivity(T("检测到图片额度限制，已进入纯语音模式，不会重试或新建对话绕过限制。", "Image quota was detected. Voice-only mode is active; no retry or new-chat bypass will be attempted."));
                 _trayIcon?.Notify("OpenGameMate", T("已进入纯语音模式。", "Voice-only mode is active."));
+                break;
+            case SubmissionOutcome.OutcomeUnknown:
+                ApplyTrigger(GameMateTrigger.AdapterInvalid);
+                _runCancellation?.Cancel();
+                AddActivity(T(
+                    "发送结果无法确认，已暂停。请检查 ChatGPT 对话；不要直接重发。",
+                    "Send result is unconfirmed; paused. Check the ChatGPT conversation before sending again."));
+                _trayIcon?.Notify("OpenGameMate", T("发送结果无法确认，已暂停。", "Send unconfirmed; paused."));
                 break;
             case SubmissionOutcome.AdapterInvalid:
                 ApplyTrigger(GameMateTrigger.AdapterInvalid);

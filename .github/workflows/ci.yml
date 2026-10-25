@@ -3,10 +3,19 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   build-test:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -21,8 +30,43 @@ jobs:
         run: dotnet build .\OpenGameMate.sln -c Release --no-restore
       - name: Test and configuration validation
         run: dotnet test .\tests\OpenGameMate.Tests\OpenGameMate.Tests.csproj -c Release --no-build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install synthetic browser test dependencies on the runner
+        run: npm install --prefix tests/browser --package-lock=false --ignore-scripts --no-audit --no-fund
+      - name: Install Chromium on the runner
+        working-directory: tests/browser
+        run: npx playwright install chromium
+      - name: Test the embedded composer script against synthetic pages
+        run: node --test --test-concurrency=1 tests/browser/composer.test.mjs
       - name: Format
         run: dotnet format .\OpenGameMate.sln --verify-no-changes --no-restore
+      - name: Show formatting corrections when needed
+        if: failure()
+        shell: pwsh
+        run: |
+          dotnet format .\OpenGameMate.sln --no-restore
+          git diff -- '*.cs' '*.csproj'
+      - name: Build experimental portable package
+        run: >-
+          dotnet publish .\src\OpenGameMate.App\OpenGameMate.App.csproj -c Release
+          -r win-x64 --self-contained true -o artifacts/voice-diagnostic
+          -p:DebugType=None -p:DebugSymbols=false
+      - name: Include license and manual test instructions
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE,PRIVACY.md,SECURITY.md -Destination artifacts/voice-diagnostic
+          Copy-Item docs/VOICE_CAPTURE_CHECK_ES.md -Destination artifacts/voice-diagnostic/LEEME.md
+          Copy-Item scripts/Start-Voice-Check.cmd -Destination artifacts/voice-diagnostic
+          .\scripts\Validate-Privacy.ps1 -ArtifactPath artifacts/voice-diagnostic
+      - name: Upload experimental package for user-controlled validation
+        uses: actions/upload-artifact@v4
+        with:
+          name: DragonicMate-voice-diagnostic-win-x64
+          path: artifacts/voice-diagnostic/
+          retention-days: 3
+          if-no-files-found: error
 
       # CI intentionally does not sign in to ChatGPT, start Voice, capture a
-      # desktop, send a real message, or create a release.
+      # desktop, send a real message, or create a release. Chromium sees only synthetic pages.

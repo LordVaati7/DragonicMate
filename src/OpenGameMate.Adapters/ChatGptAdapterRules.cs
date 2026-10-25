@@ -12,8 +12,8 @@ public sealed record ChatGptAdapterRules
     public static ChatGptAdapterRules BuiltIn { get; } = new()
     {
         SchemaVersion = CurrentSchemaVersion,
-        RulesVersion = "builtin-2026.07.14-p0-2",
-        ComposerSelector = "#prompt-textarea",
+        RulesVersion = "builtin-scoped-upload-1",
+        ComposerSelector = "#prompt-textarea, form [contenteditable=\"true\"][role=\"textbox\"]",
         FileInputSelector = "input[type=\"file\"]",
         SendButtonSelector = "button[data-testid=\"send-button\"]",
         BusyButtonSelector = "button[data-testid=\"stop-button\"]",

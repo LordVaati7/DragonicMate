@@ -16,6 +16,7 @@ public enum WebAdapterStatus
     AdapterInvalid,
     QuotaReached,
     PlatformError,
+    OutcomeUnknown,
 }
 
 public enum WebAudioState
@@ -67,9 +68,10 @@ public sealed record InputPreparationResult(
     bool AttachmentPreviewDetected,
     bool TextInserted,
     string Code,
-    WebAdapterStatus Status)
+    WebAdapterStatus Status,
+    AdapterDiagnostics? Diagnostics = null)
 {
-    public bool ImageAdded => FileInputSelected || AttachmentPreviewDetected;
+    public bool ImageAdded => AttachmentPreviewDetected;
 }
 
 public sealed record AdapterIdleProbeResult(
@@ -81,10 +83,12 @@ public sealed record AdapterIdleProbeResult(
     bool SendButtonInComposerForm,
     string Code,
     WebAdapterStatus Status,
-    AdapterDiagnostics Diagnostics)
+    AdapterDiagnostics Diagnostics,
+    bool ComposerEmpty = true)
 {
     public bool IsSafeToPrepare =>
         DomainCorrect &&
+        ComposerEmpty &&
         ComposerCount == 1 &&
         StopButtonCount == 0 &&
         SendButtonCount is 0 or 1 &&
@@ -105,7 +109,8 @@ public sealed record AdapterIdleProbeResult(
 public sealed record TextPreparationResult(
     bool TextInserted,
     string Code,
-    WebAdapterStatus Status);
+    WebAdapterStatus Status,
+    AdapterDiagnostics? Diagnostics = null);
 
 public sealed record SubmissionResult(
     bool TriggerInvoked,

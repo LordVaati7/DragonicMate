@@ -14,7 +14,9 @@ public partial class App : System.Windows.Application
         try
         {
             var paths = AppDataPaths.Resolve(e.Args, AppContext.BaseDirectory);
-            MainWindow = new MainWindow(paths);
+            var manualOnly = Array.Exists(e.Args,
+                argument => string.Equals(argument, "--manual-only", StringComparison.OrdinalIgnoreCase));
+            MainWindow = new MainWindow(paths, manualOnly);
             MainWindow.Show();
         }
         catch (Exception exception)

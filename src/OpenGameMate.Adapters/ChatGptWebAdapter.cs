@@ -66,8 +66,13 @@ public sealed class ChatGptWebAdapter : IAiWebAdapter
         }
 
         var text = await PrepareTextAsync(message, cancellationToken);
-        return image with { TextInserted = text.TextInserted, Code = text.Code,
-            Status = text.Status, Diagnostics = text.Diagnostics };
+        return image with
+        {
+            TextInserted = text.TextInserted,
+            Code = text.Code,
+            Status = text.Status,
+            Diagnostics = text.Diagnostics
+        };
     }
 
     public async Task<InputPreparationResult> PrepareImageAsync(
@@ -109,7 +114,8 @@ public sealed class ChatGptWebAdapter : IAiWebAdapter
                 cancellationToken.ThrowIfCancellationRequested();
                 using (await CallCdpAsync("DOM.setFileInputFiles", new
                 {
-                    files = new[] { Path.GetFullPath(imagePath) }, nodeId = fileNodeId,
+                    files = new[] { Path.GetFullPath(imagePath) },
+                    nodeId = fileNodeId,
                 }))
                 {
                 }
@@ -309,11 +315,21 @@ public sealed class ChatGptWebAdapter : IAiWebAdapter
         string? message = null, string? imageBase64 = null, AdapterPageState? expectedPageState = null)
     {
         if (!IsReady()) throw new InvalidOperationException("The adapter left the allowed origin.");
-        var request = JsonSerializer.Serialize(new { action, rules = _rules, operationId = _operationId,
-            requireImage, message, imageBase64, expectedPageState = expectedPageState?.ToString() });
+        var request = JsonSerializer.Serialize(new
+        {
+            action,
+            rules = _rules,
+            operationId = _operationId,
+            requireImage,
+            message,
+            imageBase64,
+            expectedPageState = expectedPageState?.ToString()
+        });
         using var response = await CallCdpAsync("Runtime.evaluate", new
         {
-            expression = $"({ComposerScript.Value})({request})", returnByValue = true, awaitPromise = true,
+            expression = $"({ComposerScript.Value})({request})",
+            returnByValue = true,
+            awaitPromise = true,
         });
         return ParseRuntimeEvaluateResponse(response.RootElement);
     }

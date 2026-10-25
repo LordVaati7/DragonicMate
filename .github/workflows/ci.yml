@@ -34,7 +34,8 @@ jobs:
         with:
           node-version: '22'
       - name: Install synthetic browser test dependencies on the runner
-        run: npm install --prefix tests/browser --package-lock=false --ignore-scripts --no-audit --no-fund
+        working-directory: tests/browser
+        run: npm install --package-lock=false --ignore-scripts --no-audit --no-fund
       - name: Install Chromium on the runner
         working-directory: tests/browser
         run: npx playwright install chromium

@@ -62,4 +62,46 @@ public sealed class StateMachineTests
         Assert.Equal(1920, RuntimePolicy.MaximumImageWidth);
         Assert.Equal(1080, RuntimePolicy.MaximumImageHeight);
     }
+
+    [Fact]
+    public void NormalSession_RejectsImageTestConfirmationAndStillRequiresVoice()
+    {
+        var machine = new GameMateStateMachine(GameMateState.BrowserReady);
+
+        Assert.False(machine.CanApply(GameMateTrigger.ImageTestConfirmed));
+        Assert.False(machine.TryApply(GameMateTrigger.ImageTestConfirmed, out _));
+        Assert.Throws<InvalidStateTransitionException>(() => machine.Apply(GameMateTrigger.ImageTestConfirmed));
+        Assert.Equal(GameMateState.BrowserReady, machine.State);
+        Assert.Equal(GameMateState.Ready, machine.Apply(GameMateTrigger.VoiceConfirmed).CurrentState);
+    }
+
+    [Fact]
+    public void ImageTestSession_RecordsExplicitImageReadinessWithoutConfirmingVoice()
+    {
+        var machine = new GameMateStateMachine(imageTestEnabled: true);
+
+        Assert.False(machine.CanApply(GameMateTrigger.ImageTestConfirmed));
+        machine.Apply(GameMateTrigger.BrowserInitialized);
+        Assert.False(machine.TryApply(GameMateTrigger.VoiceConfirmed, out _));
+        var ready = machine.Apply(GameMateTrigger.ImageTestConfirmed);
+        Assert.Equal(GameMateTrigger.ImageTestConfirmed, ready.Trigger);
+        Assert.Equal(GameMateState.Ready, ready.CurrentState);
+        Assert.Equal(GameMateState.Running, machine.Apply(GameMateTrigger.Start).CurrentState);
+    }
+
+    [Fact]
+    public void ImageTestSession_KeepsFailureStopAndRecoveryBoundaries()
+    {
+        var machine = new GameMateStateMachine(GameMateState.Sending, imageTestEnabled: true);
+
+        Assert.Equal(GameMateState.AdapterError, machine.Apply(GameMateTrigger.AdapterInvalid).CurrentState);
+        Assert.False(machine.TryApply(GameMateTrigger.BeginSend, out _));
+        machine.Apply(GameMateTrigger.AdapterRecovered);
+        machine.Apply(GameMateTrigger.ImageTestConfirmed);
+        machine.Apply(GameMateTrigger.Start);
+        machine.Apply(GameMateTrigger.BeginSend);
+        Assert.Equal(GameMateState.VoiceOnly, machine.Apply(GameMateTrigger.QuotaReached).CurrentState);
+        Assert.False(machine.TryApply(GameMateTrigger.BeginSend, out _));
+        Assert.Equal(GameMateState.Stopped, machine.Apply(GameMateTrigger.Stop).CurrentState);
+    }
 }

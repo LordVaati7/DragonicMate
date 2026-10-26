@@ -33,10 +33,11 @@ public partial class MainWindow : Window
 
     private readonly AppDataPaths _paths;
     private readonly bool _manualOnly;
+    private readonly bool _imageCheckOnly;
     private readonly IAppSettingsStore _settingsStore;
     private readonly IDiagnosticLogger _logger;
     private readonly IPrimaryDisplayCapture _capture;
-    private readonly GameMateStateMachine _stateMachine = new();
+    private readonly GameMateStateMachine _stateMachine;
     private readonly AutomaticSendLoop _automaticSendLoop = new();
     private readonly AutomaticPendingSendSlot _automaticPendingSendSlot = new();
     private readonly SubmissionCoordinator _submissionCoordinator;
@@ -60,11 +61,13 @@ public partial class MainWindow : Window
     private bool _capturingHotKey;
     private bool _updatingIdleDelaySelection;
 
-    public MainWindow(AppDataPaths paths, bool manualOnly = false)
+    public MainWindow(AppDataPaths paths, bool manualOnly = false, bool imageCheckOnly = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
-        _manualOnly = manualOnly;
+        _imageCheckOnly = imageCheckOnly;
+        _manualOnly = manualOnly || imageCheckOnly;
+        _stateMachine = new GameMateStateMachine(imageTestEnabled: imageCheckOnly);
         _settingsStore = new JsonAppSettingsStore(paths.SettingsFile);
         _logger = new JsonLineDiagnosticLogger(paths.LogsDirectory);
         _capture = new PrimaryDisplayCapture(paths.TemporaryDirectory);
@@ -425,6 +428,16 @@ public partial class MainWindow : Window
             "请在右侧内嵌页面自行登录并开启 Voice，然后在这里确认。",
             "Sign in and start Voice in the embedded page, then confirm here.");
         ConfirmVoiceButton.Content = T("我已开启 Voice", "I started Voice");
+        if (_imageCheckOnly)
+        {
+            Title += " - Image test (no Voice)";
+            SubtitleText.Text = T("仅测试图片发送；未验证 Voice。", "Image submission test only; Voice is not validated.");
+            BrowserGroup.Header = T("1. 图片测试（不使用 Voice）", "1. Image test (no Voice)");
+            BrowserInstructionText.Text = T(
+                "登录 ChatGPT，关闭 Voice，清空输入区，然后确认图片测试。",
+                "Sign in to ChatGPT, leave Voice closed, empty the composer, then confirm the image test.");
+            ConfirmVoiceButton.Content = T("确认图片测试（无 Voice）", "Confirm image test (no Voice)");
+        }
         BrowserPaneTitleText.Text = "ChatGPT";
         BrowserPaneCaptionText.Text = T(
             "内嵌网页 · 登录与 Voice 由你控制",
@@ -447,6 +460,12 @@ public partial class MainWindow : Window
         RunInstructionText.Text = T(
             $"ChatGPT 网页音频停止且页面空闲稳定 {idleDelaySeconds} 秒后，才截图并自动发送。",
             $"A screenshot is captured and sent only after ChatGPT web audio stops and the page remains idle for {idleDelaySeconds} seconds.");
+        if (_manualOnly)
+        {
+            RunInstructionText.Text = T(
+                "只在你点击立即发送或按快捷键时截图。自动截图已禁用。",
+                "Capture only when you select Send now or press the hotkey. Automatic capture is disabled.");
+        }
         StartButton.Content = T("开始陪玩", "Start");
         SendNowButton.Content = T("立即发送", "Send now");
         IdleDelayLabelText.Text = T("空闲等待", "Idle wait");
@@ -691,9 +710,12 @@ public partial class MainWindow : Window
 
         if (_stateMachine.State == GameMateState.BrowserReady)
         {
-            ApplyTrigger(GameMateTrigger.VoiceConfirmed);
-            AddActivity(T("Voice 已由用户确认。", "Voice was confirmed by the user."));
-            _ = SafeLogAsync("voice.user-confirmed", DiagnosticLevel.Information, success: true);
+            ApplyTrigger(_imageCheckOnly ? GameMateTrigger.ImageTestConfirmed : GameMateTrigger.VoiceConfirmed);
+            AddActivity(_imageCheckOnly
+                ? T("图片测试已由用户确认；未确认 Voice。", "Image test confirmed by the user; Voice was not confirmed.")
+                : T("Voice 已由用户确认。", "Voice was confirmed by the user."));
+            _ = SafeLogAsync(_imageCheckOnly ? "image-check.user-confirmed" : "voice.user-confirmed",
+                DiagnosticLevel.Information, success: true);
         }
 
         UpdateUi();
@@ -809,7 +831,9 @@ public partial class MainWindow : Window
 
         var result = MessageBox.Show(
             this,
-            T(
+            _manualOnly ? T(
+                "此模式只在你点击立即发送或按快捷键时捕获整个主显示器，并发送到当前 ChatGPT 对话。画面可能包含私人内容；请先关闭敏感窗口。不会自动截图。\n\n是否理解风险并开始？",
+                "This mode captures the entire primary display and sends it to the current ChatGPT chat only when you select Send now or press the hotkey. The image may contain private content; close sensitive windows first. Automatic capture is disabled.\n\nDo you understand the risk and want to start?") : T(
                 $"OpenGameMate 会在 ChatGPT 网页音频停止且页面空闲连续稳定 {_settings.ConversationIdleDelaySeconds} 秒后，才捕获整个主显示器并发送到当前对话。画面可能包含通知、聊天、账号名或其他私人内容。请先关闭敏感窗口。独占全屏、受保护内容和反作弊环境可能黑屏或失败，程序不会绕过保护。\n\n是否理解风险并开始？",
                 $"OpenGameMate captures the entire primary display only after ChatGPT web audio stops and the page remains idle for {_settings.ConversationIdleDelaySeconds} seconds, then sends it to the current chat. Notifications, chats, account names, or other private content may be included. Close sensitive windows first. Exclusive fullscreen, protected content, and anti-cheat environments may fail or produce black frames; protections are not bypassed.\n\nDo you understand the risk and want to start?"),
             T("整屏捕获隐私确认", "Full-display capture privacy confirmation"),
@@ -1652,7 +1676,9 @@ public partial class MainWindow : Window
 
         _adapter = new ChatGptWebAdapter(_browserSession, ChatGptAdapterRules.BuiltIn);
         ApplyTrigger(GameMateTrigger.AdapterRecovered);
-        AddActivity(T("已重新加载内置规则。请确认 Voice 后再开始；若仍失败请导出诊断。", "Built-in rules reloaded. Confirm Voice before restarting; export diagnostics if it still fails."));
+        AddActivity(_imageCheckOnly
+            ? T("规则已重新加载；请再次确认图片测试。", "Rules reloaded; confirm the image test again.")
+            : T("已重新加载内置规则。请确认 Voice 后再开始；若仍失败请导出诊断。", "Built-in rules reloaded. Confirm Voice before restarting; export diagnostics if it still fails."));
         UpdateUi();
     }
 
@@ -1761,7 +1787,7 @@ public partial class MainWindow : Window
                 : T("尚未打开", "Not opened");
         ConfirmVoiceButton.IsEnabled = browserAvailable &&
             state is GameMateState.BrowserReady or GameMateState.Stopped or GameMateState.Idle;
-        var canSendRole = !_auxiliaryOperation && _adapter is not null &&
+        var canSendRole = !_imageCheckOnly && !_auxiliaryOperation && _adapter is not null &&
             state is GameMateState.BrowserReady or GameMateState.Ready or GameMateState.Paused;
         SendFullRoleButton.IsEnabled = canSendRole;
         SendShortRoleButton.IsEnabled = canSendRole;
@@ -1775,6 +1801,19 @@ public partial class MainWindow : Window
         StopButton.IsEnabled = IsRunRelatedState(state) || state == GameMateState.AdapterError;
         RetryAdapterButton.IsEnabled = state == GameMateState.AdapterError;
         RunStatusText.Text = StateDescription(state);
+        if (_imageCheckOnly)
+        {
+            RunStatusText.Text = state switch
+            {
+                GameMateState.BrowserReady => T("请登录并确认图片测试。", "Sign in, then confirm the image test."),
+                GameMateState.Ready => T("图片测试已确认；点击开始。", "Image test confirmed; select Start."),
+                GameMateState.Running => T("仅手动发送图片；未使用 Voice。", "Manual image test active; Voice is not in use."),
+                GameMateState.VoiceOnly => T("图片额度受限，已停止截图。", "Image quota reached; capture is stopped."),
+                GameMateState.Stopped => T("已停止；再次确认图片测试可重新开始。", "Stopped; confirm the image test again to restart."),
+                _ => RunStatusText.Text,
+            };
+        }
+        IdleDelayComboBox.IsEnabled = !_manualOnly;
 
         _trayIcon?.Update(
             IsChinese,

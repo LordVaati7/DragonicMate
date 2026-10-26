@@ -3,6 +3,28 @@
 Esta es una compilación experimental del adaptador. La interfaz todavía se llama
 OpenGameMate. No incluye captura exclusiva de Kenshi ni contexto de campaña.
 
+## Probar solo imágenes cuando Voice web no funciona
+
+Este modo prueba únicamente captura y envío al chat de texto; no demuestra que
+Voice funcione ni que el juego conserve el foco. El automático queda desactivado
+incluso sin el argumento `--manual-only`.
+
+1. Extrae el paquete actualizado en una carpeta nueva fuera del repositorio.
+2. Abre `Start-Image-Check.cmd`. El título debe incluir `Image test (no Voice)`.
+3. Pulsa `Open ChatGPT`, inicia sesión y deja la página en modo texto, con Voice
+   cerrado y el compositor vacío. El botón X azul de ChatGPT cierra Voice si quedó abierto.
+4. En el panel izquierdo pulsa `Confirm image test (no Voice)` y después `Start`.
+   No se registra ninguna confirmación de Voice: el evento es `image-check.user-confirmed`.
+5. Usa una escena inocua: todavía se captura todo el monitor principal. Cierra
+   información privada y pulsa `Send now` una sola vez.
+6. Comprueba visualmente si aparece exactamente una imagen en la conversación.
+   Puedes preguntar por texto qué muestra. El programa no lee la respuesta.
+7. Pulsa `Stop` y comunica si llegó la imagen o exporta el diagnóstico si falla.
+   No repitas inmediatamente un envío no confirmado ni una operación con adjuntos residuales.
+
+El modo normal y `Start-Voice-Check.cmd` siguen requiriendo confirmación real de
+Voice. El modo de imágenes no corrige el error de descarga de Silero VAD.
+
 ## Qué está validado y qué falta
 
 GitHub Actions compila en Windows y prueba reglas, estados y páginas sintéticas.

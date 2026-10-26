@@ -16,7 +16,9 @@ public partial class App : System.Windows.Application
             var paths = AppDataPaths.Resolve(e.Args, AppContext.BaseDirectory);
             var manualOnly = Array.Exists(e.Args,
                 argument => string.Equals(argument, "--manual-only", StringComparison.OrdinalIgnoreCase));
-            MainWindow = new MainWindow(paths, manualOnly);
+            var imageCheckOnly = Array.Exists(e.Args,
+                argument => string.Equals(argument, "--image-check", StringComparison.OrdinalIgnoreCase));
+            MainWindow = new MainWindow(paths, manualOnly, imageCheckOnly);
             MainWindow.Show();
         }
         catch (Exception exception)

@@ -59,12 +59,37 @@ test('explicit HTML form association works outside the form tree', async t => {
   assert.equal(await page.locator('[data-opengamemate-file]').getAttribute('id'), 'associated');
 });
 
-test('ambiguous inputs within the active form fail without selecting or pasting', async t => {
-  const { page, run } = await fixture(t, `<form>${editor}${send}<input type="file"><input type="file"></form>`);
+for (const count of [2, 4]) {
+  test(`${count} associated inputs: paste only into the composer, never choose an input`, async t => {
+    const { page, run } = await fixture(t, `<form>${editor}${send}${'<input type="file" hidden>'.repeat(count)}</form>`);
+    await page.locator('#prompt-textarea').evaluate(element => element.addEventListener('paste', event => {
+      window.pastes = (window.pastes ?? 0) + 1;
+      window.pasteTarget = event.target.id;
+      element.closest('form').insertAdjacentHTML('beforeend', '<div data-testid="file-thumbnail">Synthetic image</div>');
+    }));
+    const begin = await run('begin', { requireImage: true });
+    assert.equal(begin.code, `prepare-c1-f${count}-s${count}`);
+    assert.equal(begin.method, 'composer-paste');
+    assert.equal(await page.evaluate(() => window.pastes ?? 0), 0);
+    assert.equal((await run('paste', { imageBase64: 'AA==' })).code, 'paste-dispatched');
+    assert.equal(await page.locator('[data-opengamemate-file]').count(), 0);
+    assert.equal(await page.locator('input').evaluateAll(inputs => inputs.every(input => input.files.length === 0)), true);
+    assert.equal(await page.evaluate(() => window.pasteTarget), 'prompt-textarea');
+    assert.equal((await run('attachment')).previewDetected, true);
+    assert.equal((await run('text', { message: 'Synthetic prompt' })).textInserted, true);
+  });
+}
+
+test('rejected paste is attempted once and never treated as a prepared image', async t => {
+  const { page, run } = await fixture(t, `<form>${editor}${send}${'<input type="file">'.repeat(4)}</form>`);
   await page.evaluate(() => { window.pastes = 0; document.addEventListener('paste', () => window.pastes++); });
-  assert.equal((await run('begin', { requireImage: true })).code, 'file-input-ambiguous-2');
-  assert.equal(await page.locator('[data-opengamemate-file]').count(), 0);
-  assert.equal(await page.evaluate(() => window.pastes), 0);
+  await run('begin', { requireImage: true });
+  await run('paste', { imageBase64: 'AA==' });
+  assert.equal((await run('paste', { imageBase64: 'AA==' })).code, 'paste-not-permitted');
+  assert.equal(await page.evaluate(() => window.pastes), 1);
+  assert.equal((await run('attachment')).previewDetected, false);
+  assert.equal((await run('text', { message: 'Synthetic prompt' })).code, 'attachment-not-ready');
+  assert.equal((await run('invoke')).invoked, undefined);
 });
 
 test('unassociated inputs are untouched; paste targets the unique composer only', async t => {

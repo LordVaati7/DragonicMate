@@ -61,3 +61,17 @@ compositor, entradas ambiguas, espera de adjunto y resultado desconocido.
 
 No se instalan modelos locales ni se utilizan servicios de IA facturados por API.
 Se aplican las capacidades y límites normales de tu cuenta ChatGPT.
+
+## Si hay varias entradas de archivo o Voice no carga
+
+El adaptador deja intactas las entradas de archivo cuando hay varias asociadas al
+formulario. Intenta una sola operación de pegado dirigida al compositor visible
+único y exige una vista previa antes de preparar texto o enviar. Un pegado que no
+produce adjunto termina con `attachment-ready-timeout`, sin escoger otro control.
+
+Si aparece `Silero VAD failed to load` también en Edge o Chrome, detén la prueba
+de capturas: la carga de Voice debe funcionar primero en el navegador habitual.
+Ese mensaje por sí solo no distingue un fallo del recurso de ChatGPT de un
+problema de red, caché o filtrado. No reinstales herramientas ni desactives el
+antivirus para comprobarlo. Una recarga sin caché y una comprobación breve usando
+otra conexión de confianza permiten acotar el problema.

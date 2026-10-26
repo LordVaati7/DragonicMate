@@ -77,12 +77,11 @@
       element instanceof HTMLInputElement && element.type === 'file' && enabled(element) &&
       (!element.accept || /image|png|jpe?g|gif/i.test(element.accept)));
     const scopedFiles = files.filter(element => element.form === form);
-    if (request.requireImage && scopedFiles.length > 1) {
-      return result(`file-input-ambiguous-${scopedFiles.length}`, {}, 'ButtonDiscovery');
-    }
+    // Multiple upload inputs are not interchangeable. In that case leave every
+    // input untouched and use only the unique visible composer's paste handler.
     const state = { operationId, composer, form, href: location.href,
-      requireImage: Boolean(request.requireImage), file: scopedFiles[0] ?? null,
-      expectedText: null, invoked: false, voiceOpen: voiceOpen() };
+      requireImage: Boolean(request.requireImage), file: scopedFiles.length === 1 ? scopedFiles[0] : null,
+      expectedText: null, invoked: false, attachmentAttempted: false, voiceOpen: voiceOpen() };
     window[key] = state;
     // Mark only an explicitly form-associated input. Other inputs remain untouched.
     if (state.requireImage && state.file) {
@@ -100,6 +99,9 @@
   }
 
   if (action === 'paste') {
+    if (!state.requireImage || state.file || state.attachmentAttempted) {
+      return result('paste-not-permitted', {}, 'Readiness');
+    }
     if (state.invoked || text(composer).trim() || hasAttachment() || stopButtons().length) {
       return result('composer-changed-before-paste', {}, 'Readiness');
     }
@@ -107,6 +109,7 @@
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
     const transfer = new DataTransfer();
     transfer.items.add(new File([bytes], 'opengamemate-screen.png', { type: 'image/png' }));
+    state.attachmentAttempted = true;
     composer.dispatchEvent(new ClipboardEvent('paste', {
       bubbles: true, cancelable: true, composed: true, clipboardData: transfer
     }));

@@ -144,7 +144,9 @@ public sealed class ChatGptWebAdapter : IAiWebAdapter
                 }
                 await Task.Delay(PollIntervalMilliseconds, cancellationToken);
             }
-            return new(false, false, false, "attachment-ready-timeout", WebAdapterStatus.AdapterInvalid);
+            cancellationToken.ThrowIfCancellationRequested();
+            var timeout = await EvaluateActionAsync("attachment-timeout");
+            return ImageResult(timeout, PreparationFailureStatus(timeout));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

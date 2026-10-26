@@ -125,7 +125,21 @@
     return result('file-selected', { fileSelected: state.file.files?.length === 1 });
   }
 
-  if (action === 'attachment') {
+  if (action === 'attachment' || action === 'attachment-timeout') {
+    if (action === 'attachment-timeout') {
+      // Observe only controls in this operation's form. Never return image URLs,
+      // labels, HTML, composer text, or conversation content.
+      const images = [...form.querySelectorAll('img')].filter(visible);
+      const count = elements => Math.min(elements.length, 99);
+      const schemeCount = scheme => count(images.filter(image =>
+        image.getAttribute('src')?.startsWith(scheme)));
+      const sends = sendButtons();
+      return result(`attachment-timeout-p${Number(hasAttachment())}-u${Number(uploading())}` +
+        `-i${count(images)}-b${schemeCount('blob:')}-d${schemeCount('data:')}` +
+        `-h${schemeCount('https:')}-s${count(sends)}-e${Number(sends.length === 1 && enabled(sends[0]))}`,
+        { fileSelected: Boolean(state.file?.files?.length === 1),
+          previewDetected: hasAttachment(), uploading: uploading() }, 'Readiness');
+    }
     return result('attachment-observed', {
       fileSelected: Boolean(state.file?.files?.length === 1),
       previewDetected: hasAttachment(), uploading: uploading()

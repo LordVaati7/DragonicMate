@@ -160,6 +160,31 @@ test('upload in progress prevents text insertion and invocation', async t => {
   assert.equal((await run('text', { message: 'Synthetic prompt' })).code, 'attachment-not-ready');
 });
 
+test('timeout distinguishes an unrecognized image from upload activity without exposing content', async t => {
+  const { page, run } = await fixture(t);
+  await run('begin', { requireImage: true });
+  await page.locator('form').evaluate(form => form.insertAdjacentHTML('beforeend',
+    '<img src="https://private.invalid/PRIVATE_IMAGE" alt="PRIVATE_LABEL" style="width:80px;height:80px">'));
+  const timeout = await run('attachment-timeout');
+  assert.equal(timeout.code, 'attachment-timeout-p0-u0-i1-b0-d0-h1-s1-e1');
+  assert.equal(timeout.previewDetected, false);
+  assert.equal(timeout.diagnostics.failureStage, 'Readiness');
+  assert.equal(JSON.stringify(timeout).includes('PRIVATE'), false);
+  assert.equal((await run('text', { message: 'Synthetic prompt' })).code, 'attachment-not-ready');
+  assert.equal((await run('invoke')).invoked, undefined);
+  await page.locator('form').evaluate((form, html) => form.insertAdjacentHTML('beforeend', html),
+    `${preview}<progress></progress>`);
+  assert.equal((await run('attachment-timeout')).code, 'attachment-timeout-p1-u1-i1-b0-d0-h1-s1-e1');
+});
+
+test('timeout counts neither hidden images nor images outside the active form', async t => {
+  const { page, run } = await fixture(t, `<img src="https://private.invalid/OUTSIDE"><form>${editor}${send}</form>`);
+  await run('begin', { requireImage: true });
+  await page.locator('form').evaluate(form => form.insertAdjacentHTML('beforeend',
+    '<img hidden src="https://private.invalid/HIDDEN">'));
+  assert.equal((await run('attachment-timeout')).code, 'attachment-timeout-p0-u0-i0-b0-d0-h0-s1-e1');
+});
+
 test('clear file input does not confirm an image submission while preview remains', async t => {
   const { page, run } = await prepare(t);
   await run('invoke');

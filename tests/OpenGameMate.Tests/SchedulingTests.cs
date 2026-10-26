@@ -48,13 +48,41 @@ public sealed class SchedulingTests
             return Task.FromResult(SubmissionOutcome.Succeeded);
         });
 
-        var automaticTask = coordinator.RunAutomaticAsync();
+        // Hold Task.Yield's continuation so this test actually exercises a manual
+        // request arriving before automatic work starts, rather than a pool race.
+        var context = new DeferredContinuationContext();
+        var previousContext = SynchronizationContext.Current;
+        Task<SubmissionDispatchResult> automaticTask;
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+            automaticTask = coordinator.RunAutomaticAsync();
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
         var manual = await coordinator.RunManualAsync();
+        context.Resume();
         var automatic = await automaticTask;
 
         Assert.Equal(SubmissionDispatchStatus.Executed, manual.Status);
         Assert.Equal(SubmissionDispatchStatus.SkippedForManualPriority, automatic.Status);
         Assert.Equal([SubmissionOrigin.Manual], invocations);
+    }
+
+    private sealed class DeferredContinuationContext : SynchronizationContext
+    {
+        private readonly Queue<(SendOrPostCallback Callback, object? State)> _posted = new();
+
+        public override void Post(SendOrPostCallback callback, object? state) => _posted.Enqueue((callback, state));
+
+        public void Resume()
+        {
+            var (callback, state) = Assert.Single(_posted);
+            _posted.Dequeue();
+            callback(state);
+        }
     }
 
     [Fact]

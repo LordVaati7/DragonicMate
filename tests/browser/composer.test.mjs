@@ -4,18 +4,26 @@ import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 
 const source = await readFile(new URL('../../src/OpenGameMate.Adapters/ChatGptComposer.js', import.meta.url), 'utf8');
-const rules = {
-  ComposerSelector: '#prompt-textarea, form [contenteditable="true"][role="textbox"]',
-  FileInputSelector: 'input[type="file"]',
-  SendButtonSelector: 'button[data-testid="send-button"]',
-  BusyButtonSelector: 'button[data-testid="stop-button"]',
-  AttachmentPreviewSelectors: ['[data-testid="file-thumbnail"]'],
-  QuotaErrorSelectors: ['[data-testid="quota-error"]'],
-  PlatformErrorSelectors: ['[data-testid="composer-error"]']
-};
+// Decode the literal selectors from the production BuiltIn initializer, rather
+// than maintaining a second set of rules which can hide production regressions.
+const ruleSource = await readFile(new URL('../../src/OpenGameMate.Adapters/ChatGptAdapterRules.cs', import.meta.url), 'utf8');
+const initializer = ruleSource.split('BuiltIn { get; } = new()')[1]?.split('\n    };')[0];
+assert.ok(initializer, 'Production BuiltIn rule initializer must be available');
+const literal = '"(?:[^"\\\\]|\\\\.)*"';
+const rules = Object.fromEntries([
+  'ComposerSelector', 'FileInputSelector', 'SendButtonSelector', 'BusyButtonSelector',
+  'AttachmentPreviewSelectors', 'QuotaErrorSelectors', 'PlatformErrorSelectors'
+].map(name => {
+  const array = name.endsWith('Selectors');
+  const match = initializer.match(new RegExp(`${name}\\s*=\\s*(${array ? '\\[[\\s\\S]*?\\]' : literal})`));
+  assert.ok(match, `Production rule ${name} must use literal selectors`);
+  return [name, array ? [...match[1].matchAll(new RegExp(literal, 'g'))].map(value => JSON.parse(value[0]))
+    : JSON.parse(match[1])];
+}));
 const editor = '<div id="prompt-textarea" contenteditable="true" role="textbox"></div>';
 const send = '<button data-testid="send-button" type="button">Send</button>';
 const preview = '<div data-testid="file-thumbnail">Synthetic image</div>';
+const dataImage = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="80" height="45"%3E%3C/svg%3E';
 let browser;
 before(async () => { browser = await chromium.launch(); });
 after(async () => { await browser?.close(); });
@@ -263,4 +271,118 @@ test('manual preparation supports a stable open Voice session without enabling a
 test('non-official origins fail before reading or mutating composer', async t => {
   const { run } = await fixture(t, `<form>${editor}${send}</form>`, 'https://example.com/');
   assert.equal((await run('begin')).code, 'unexpected-origin');
+});
+
+async function addDataPreview(page) {
+  await page.locator('form').evaluate((form, src) => {
+    const image = document.createElement('img');
+    image.src = src;
+    form.append(image);
+  }, dataImage);
+  await page.waitForFunction(() => {
+    const image = document.querySelector('form img');
+    return image?.complete && image.naturalWidth > 0;
+  });
+}
+
+test('real rules handle the observed data image and five unlabelled buttons through one submission', async t => {
+  const { page, run } = await fixture(t, `<form>${editor}${'<button type="button">Other</button>'.repeat(4)}
+    <button type="submit">Send</button>${'<input type="file" hidden>'.repeat(4)}</form>`);
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 80;
+    canvas.height = 45;
+    return canvas.toDataURL('image/png');
+  });
+  await page.evaluate(src => {
+    document.querySelector('#prompt-textarea').addEventListener('paste', event => {
+      event.preventDefault();
+      window.pastes = (window.pastes ?? 0) + 1;
+      const image = document.createElement('img');
+      image.src = src;
+      event.target.closest('form').append(image);
+    });
+    document.querySelector('form').addEventListener('submit', event => {
+      event.preventDefault();
+      window.submissions = (window.submissions ?? 0) + 1;
+      window.submittedText = document.querySelector('#prompt-textarea').innerText;
+      window.submittedImages = event.target.querySelectorAll('img').length;
+      document.querySelector('#prompt-textarea').replaceChildren();
+      event.target.querySelector('img').remove();
+    });
+  }, png);
+  assert.equal((await run('begin', { requireImage: true })).method, 'composer-paste');
+  await run('paste', { imageBase64: 'AA==' });
+  await page.waitForFunction(() => document.querySelector('form img')?.naturalWidth > 0);
+  const attachment = await run('attachment');
+  assert.equal(attachment.previewDetected, true);
+  assert.equal(attachment.uploading, false);
+  assert.equal((await run('text', { message: 'Synthetic prompt' })).textInserted, true);
+  assert.equal((await run('control')).sendButtonCount, 1);
+  assert.equal((await run('invoke')).invoked, true);
+  assert.equal((await run('post')).consumed, true);
+  assert.equal((await run('invoke')).code, 'already-invoked');
+  assert.deepEqual(await page.evaluate(() => [window.pastes, window.submissions,
+    window.submittedImages, window.submittedText]), [1, 1, 1, 'Synthetic prompt']);
+});
+
+test('pre-existing data images are preserved and never adopted', async t => {
+  const { page, run } = await fixture(t);
+  await addDataPreview(page);
+  assert.equal((await run('begin', { requireImage: true })).code, 'composer-attachment-present');
+  assert.equal(await page.locator('form img').count(), 1);
+});
+
+test('a data image outside the active form cannot unlock submission', async t => {
+  const { page, run } = await fixture(t);
+  await run('begin', { requireImage: true });
+  await page.evaluate(src => { const image = new Image(); image.src = src; document.body.append(image); }, dataImage);
+  assert.equal((await run('attachment')).previewDetected, false);
+  assert.equal((await run('text', { message: 'Synthetic prompt' })).code, 'attachment-not-ready');
+});
+
+test('broken data images cannot be treated as ready attachments', async t => {
+  const { page, run } = await fixture(t);
+  await run('begin', { requireImage: true });
+  await page.locator('form').evaluate(form => form.insertAdjacentHTML('beforeend',
+    '<img src="data:image/png;base64,AA==" style="width:80px;height:45px">'));
+  assert.equal((await run('attachment')).uploading, true);
+  assert.equal((await run('text', { message: 'Synthetic prompt' })).code, 'attachment-not-ready');
+});
+
+test('duplicate generic submit buttons prevent any click', async t => {
+  const { page, run } = await fixture(t, `<form>${editor}<button type="submit">One</button><button type="submit">Two</button></form>`);
+  await run('begin', { requireImage: true });
+  await addDataPreview(page);
+  await run('text', { message: 'Synthetic prompt' });
+  assert.equal((await run('control')).sendButtonCount, 2);
+  assert.equal((await run('invoke')).invoked, undefined);
+});
+
+test('an identified send button plus a distinct submit button also remains ambiguous', async t => {
+  const { page, run } = await prepare(t);
+  await page.locator('form').evaluate(form => form.insertAdjacentHTML('beforeend', '<button type="submit">Other</button>'));
+  assert.equal((await run('control')).sendButtonCount, 2);
+  assert.equal((await run('invoke')).invoked, undefined);
+});
+
+for (const attribute of ['formaction', 'formmethod', 'formtarget', 'form']) {
+  test(`a submit button with ${attribute} reassignment is ineligible`, async t => {
+    const { page, run } = await fixture(t, `<form id="active">${editor}<button type="submit" ${attribute}="other">Other</button></form><form id="other"></form>`);
+    await run('begin', { requireImage: true });
+    await page.locator('#active').evaluate((form, html) => form.insertAdjacentHTML('beforeend', html), preview);
+    await run('text', { message: 'Synthetic prompt' });
+    assert.equal((await run('control')).sendButtonCount, 0);
+    assert.equal((await run('invoke')).invoked, undefined);
+  });
+}
+
+test('matching both send selectors still counts as one button', async t => {
+  const { page, run } = await prepare(t);
+  await page.locator('[data-testid="send-button"]').evaluate(button => {
+    button.type = 'submit';
+    button.addEventListener('click', event => event.preventDefault());
+  });
+  assert.equal((await run('control')).sendButtonCount, 1);
+  assert.equal((await run('invoke')).invoked, true);
 });

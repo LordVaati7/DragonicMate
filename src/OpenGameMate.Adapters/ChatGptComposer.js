@@ -34,8 +34,20 @@
     [...document.querySelectorAll(selector)].some(visible));
   const platformError = () => rules.PlatformErrorSelectors.some(selector =>
     [...document.querySelectorAll(selector)].some(visible));
-  const uploading = () => matches(['[aria-busy="true"]', '[role="progressbar"]', 'progress']).length > 0;
-  const sendButtons = () => [...form.querySelectorAll(rules.SendButtonSelector)].filter(visible);
+  const uploading = () => {
+    const images = [...new Set(attachments().flatMap(element =>
+      element instanceof HTMLImageElement ? [element] : [...element.querySelectorAll('img')]))]
+      .filter(visible);
+    return matches(['[aria-busy="true"]', '[role="progressbar"]', 'progress']).length > 0 ||
+      images.some(image => !image.complete || image.naturalWidth === 0);
+  };
+  // Both selectors are scoped to the unique composer's form. A submit button
+  // associated with another form or an alternate endpoint is never eligible.
+  // Multiple candidates remain ambiguous; never prefer the first one.
+  const sendButtons = () => [...form.querySelectorAll(rules.SendButtonSelector)]
+    .filter(button => visible(button) && button.form === form &&
+      !button.hasAttribute('formaction') && !button.hasAttribute('formmethod') &&
+      !button.hasAttribute('formtarget'));
   const stopButtons = () => [...document.querySelectorAll(rules.BusyButtonSelector)].filter(visible);
   const voiceOpen = () => [...document.querySelectorAll(
     'button[data-testid="end-voice-mode-button"],[data-testid="voice-mode-composer"]')].some(visible);

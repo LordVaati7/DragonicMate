@@ -12,10 +12,10 @@ public sealed record ChatGptAdapterRules
     public static ChatGptAdapterRules BuiltIn { get; } = new()
     {
         SchemaVersion = CurrentSchemaVersion,
-        RulesVersion = "builtin-scoped-upload-1",
+        RulesVersion = "builtin-scoped-upload-2",
         ComposerSelector = "#prompt-textarea, form [contenteditable=\"true\"][role=\"textbox\"]",
         FileInputSelector = "input[type=\"file\"]",
-        SendButtonSelector = "button[data-testid=\"send-button\"]",
+        SendButtonSelector = "button[data-testid=\"send-button\"], button[type=\"submit\"]",
         BusyButtonSelector = "button[data-testid=\"stop-button\"]",
         AttachmentPreviewSelectors =
         [
@@ -26,6 +26,7 @@ public sealed record ChatGptAdapterRules
             "[data-testid*=\"attachment-preview\"]",
             "[data-testid=\"remove-file-button\"]",
             "img[src^=\"blob:\"]",
+            "img[src^=\"data:image/\"]",
         ],
         QuotaErrorSelectors =
         [

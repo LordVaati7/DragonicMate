@@ -3,6 +3,10 @@
 Esta es una compilación experimental del adaptador. La interfaz todavía se llama
 OpenGameMate. No incluye captura exclusiva de Kenshi ni contexto de campaña.
 
+Esta revisión reconoce miniaturas `data:image/` y el botón `submit` dentro del
+formulario del compositor. Rechaza botones ambiguos o dirigidos a otro formulario,
+adjuntos previos e imágenes que no hayan cargado. No corrige Silero VAD.
+
 ## Probar solo imágenes cuando Voice web no funciona
 
 Este modo prueba únicamente captura y envío al chat de texto; no demuestra que
@@ -11,7 +15,8 @@ incluso sin el argumento `--manual-only`.
 
 1. Extrae el paquete actualizado en una carpeta nueva fuera del repositorio.
 2. Abre `Start-Image-Check.cmd`. El título debe incluir `Image test (no Voice)`.
-3. Pulsa `Open ChatGPT`, inicia sesión y deja la página en modo texto, con Voice
+3. Pulsa `Open ChatGPT`, inicia sesión y abre un chat nuevo para evitar el adjunto
+   residual de una prueba anterior. Deja la página en modo texto, con Voice
    cerrado y el compositor vacío. El botón X azul de ChatGPT cierra Voice si quedó abierto.
 4. En el panel izquierdo pulsa `Confirm image test (no Voice)` y después `Start`.
    No se registra ninguna confirmación de Voice: el evento es `image-check.user-confirmed`.

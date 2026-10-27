@@ -15,10 +15,12 @@ const rules = Object.fromEntries([
   'AttachmentPreviewSelectors', 'QuotaErrorSelectors', 'PlatformErrorSelectors'
 ].map(name => {
   const array = name.endsWith('Selectors');
-  const match = initializer.match(new RegExp(`${name}\\s*=\\s*(${array ? '\\[[\\s\\S]*?\\]' : literal})`));
+  const match = initializer.match(new RegExp(`${name}\\s*=\\s*(${array ? '\\[[\\s\\S]*?\\n\\s*\\]' : literal})`));
   assert.ok(match, `Production rule ${name} must use literal selectors`);
-  return [name, array ? [...match[1].matchAll(new RegExp(literal, 'g'))].map(value => JSON.parse(value[0]))
-    : JSON.parse(match[1])];
+  const value = array ? [...match[1].matchAll(new RegExp(literal, 'g'))].map(value => JSON.parse(value[0]))
+    : JSON.parse(match[1]);
+  assert.ok(value.length > 0, `Production rule ${name} cannot be empty`);
+  return [name, value];
 }));
 const editor = '<div id="prompt-textarea" contenteditable="true" role="textbox"></div>';
 const send = '<button data-testid="send-button" type="button">Send</button>';

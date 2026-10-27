@@ -309,6 +309,7 @@ test('real rules handle the observed data image and five unlabelled buttons thro
       window.submittedImages = event.target.querySelectorAll('img').length;
       document.querySelector('#prompt-textarea').replaceChildren();
       event.target.querySelector('img').remove();
+      history.pushState({}, '', '/c/synthetic-created-conversation');
     });
   }, png);
   assert.equal((await run('begin', { requireImage: true })).method, 'composer-paste');
@@ -321,7 +322,7 @@ test('real rules handle the observed data image and five unlabelled buttons thro
   assert.equal((await run('control')).sendButtonCount, 1);
   assert.equal((await run('invoke')).invoked, true);
   assert.equal((await run('post')).consumed, true);
-  assert.equal((await run('invoke')).code, 'already-invoked');
+  assert.equal((await run('invoke')).invoked, undefined);
   assert.deepEqual(await page.evaluate(() => [window.pastes, window.submissions,
     window.submittedImages, window.submittedText]), [1, 1, 1, 'Synthetic prompt']);
 });
@@ -385,4 +386,13 @@ test('matching both send selectors still counts as one button', async t => {
   });
   assert.equal((await run('control')).sendButtonCount, 1);
   assert.equal((await run('invoke')).invoked, true);
+});
+
+test('an unrelated navigation after a click cannot confirm submission', async t => {
+  const { page, run } = await prepare(t);
+  await run('invoke');
+  await page.locator('#prompt-textarea').fill('');
+  await page.locator('[data-testid="file-thumbnail"]').evaluate(element => element.remove());
+  await page.evaluate(() => history.pushState({}, '', '/settings'));
+  assert.equal((await run('post')).code, 'prepared-context-changed');
 });

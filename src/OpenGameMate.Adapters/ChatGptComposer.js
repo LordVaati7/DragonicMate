@@ -105,8 +105,14 @@
   }
 
   const state = window[key];
+  // The first submission can turn the new-chat root into a conversation URL.
+  // Allow only post-click observation across that transition, with the same
+  // origin and the exact same composer/form. Never permit another invocation.
+  const newChatSubmitted = action === 'post' && state?.invoked &&
+    new URL(state.href).origin === location.origin &&
+    new URL(state.href).pathname === '/' && /^\/c\/[^/]+$/.test(location.pathname);
   if (!state || state.operationId !== operationId || state.composer !== composer ||
-      state.form !== form || state.href !== location.href) {
+      state.form !== form || (state.href !== location.href && !newChatSubmitted)) {
     return result('prepared-context-changed', {}, 'Readiness');
   }
 

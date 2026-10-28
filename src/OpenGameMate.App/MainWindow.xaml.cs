@@ -32,13 +32,12 @@ public partial class MainWindow : Window
     }
 
     private readonly AppDataPaths _paths;
-    private readonly bool _manualOnly;
+    private bool _manualOnly;
     private readonly bool _imageCheckOnly;
     private readonly IAppSettingsStore _settingsStore;
     private readonly IDiagnosticLogger _logger;
     private readonly KenshiWindowCapture _capture;
     private readonly GameMateStateMachine _stateMachine;
-    private readonly AutomaticSendLoop _automaticSendLoop = new();
     private readonly AutomaticPendingSendSlot _automaticPendingSendSlot = new();
     private readonly SubmissionCoordinator _submissionCoordinator;
 
@@ -66,7 +65,8 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
         _imageCheckOnly = imageCheckOnly;
-        _manualOnly = true; // Validate window capture only on explicit request.
+        _manualOnly = true;
+        _forceManual = manualOnly || imageCheckOnly;
         _stateMachine = new GameMateStateMachine(imageTestEnabled: imageCheckOnly);
         _settingsStore = new JsonAppSettingsStore(paths.SettingsFile);
         _logger = new JsonLineDiagnosticLogger(paths.LogsDirectory);
@@ -850,7 +850,7 @@ public partial class MainWindow : Window
         }
         AddActivity(T(
             $"陪玩已开始；网页音频停止且页面空闲稳定 {_settings.ConversationIdleDelaySeconds} 秒后自动发送。",
-            $"Companion mode started; automatic capture waits for {_settings.ConversationIdleDelaySeconds} seconds of stable page and web-audio silence."));
+            $"Periodic capture enabled: {_periodicInterval.TotalMinutes:0} minutes plus a safe idle wait."));
         _ = SafeLogAsync("run.started", DiagnosticLevel.Information, success: true);
         UpdateUi();
     }
@@ -859,11 +859,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            await _automaticSendLoop.RunAsync(
-                () => _stateMachine.State == GameMateState.Running,
-                ObserveConversationIdleAsync,
-                ProcessAutomaticOccurrenceAsync,
-                cancellationToken);
+            await RunPeriodicCaptureLoopAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -892,7 +888,7 @@ public partial class MainWindow : Window
         var probe = await _adapter.ProbeIdleAsync(cancellationToken);
         if (probe.Status != WebAdapterStatus.AdapterInvalid)
         {
-            return probe.IsSafeToPrepare;
+            return probe.IsSafeToPrepareForPeriodic;
         }
 
         await SafeLogAsync(
@@ -923,7 +919,7 @@ public partial class MainWindow : Window
                 scheduledAt,
                 createdAt,
                 out var pending,
-                SelectedConversationIdleDelay) ||
+                TimeSpan.FromSeconds(10)) ||
             pending is null)
         {
             await SafeLogAsync(
@@ -962,6 +958,12 @@ public partial class MainWindow : Window
 
             _dispatchingAutomaticPending = pending;
             var result = await _submissionCoordinator.RunAutomaticAsync(cancellationToken);
+            if (result.Status == SubmissionDispatchStatus.Executed &&
+                result.Outcome == SubmissionOutcome.OrdinaryFailure && _stateMachine.State == GameMateState.Running)
+            {
+                AddActivity("Periodic capture stopped after an unsuccessful attempt. Inspect the chat before restarting.");
+                StopRun();
+            }
             if (result.Status != SubmissionDispatchStatus.Executed)
             {
                 await SafeLogAsync(
@@ -1027,13 +1029,13 @@ public partial class MainWindow : Window
                 ? "audio-unknown"
                 : audio.IsPlaying
                     ? "audio-playing"
-                    : !probe.IsSafeToPrepare
+                    : !probe.IsSafeToPrepareForPeriodic
                         ? GetUnsafePreparationReason(probe)
                         : "idle-stabilizing";
             var previousCandidate = pending.IdleCandidateAt;
             var observation = pending.Observe(
                 observedAt,
-                probe.IsSafeToPrepare,
+                probe.IsSafeToPrepareForPeriodic,
                 audioSilent,
                 audio.SilentDuration,
                 deferredReason);
@@ -1124,7 +1126,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        ResetPeriodicTimer();
         var result = await _submissionCoordinator.RunManualAsync(_runCancellation?.Token ?? CancellationToken.None);
+        if (_stateMachine.State == GameMateState.Running) ResetPeriodicTimer();
         if (result.Status != SubmissionDispatchStatus.Executed)
         {
             AddActivity(T("当前已有发送任务；手动请求未排队。", "A submission is active; the manual request was not queued."));
@@ -1174,6 +1178,7 @@ public partial class MainWindow : Window
             AddActivity(T(
                 $"截图失败：{exception.Code}。独占全屏可尝试无边框模式。",
                 $"Capture failed: {exception.Code}. Try borderless mode for exclusive fullscreen."));
+            if (!_manualOnly) StopRun();
         }
         catch (Exception exception)
         {
@@ -1351,6 +1356,7 @@ public partial class MainWindow : Window
         var expectedPreparedPageState = expectedPageState.Value switch
         {
             AdapterPageState.Composer => AdapterPageState.ComposerWithAttachment,
+            AdapterPageState.VoiceComposer => AdapterPageState.VoiceComposerWithAttachment,
             _ => AdapterPageState.Unknown,
         };
         if (expectedPreparedPageState == AdapterPageState.Unknown)
@@ -1449,7 +1455,7 @@ public partial class MainWindow : Window
         }
 
         var probe = await _adapter.ProbeIdleAsync(cancellationToken);
-        return probe.IsSafeToPrepare && probe.Diagnostics.PageState == expectedPageState;
+        return probe.IsSafeToPrepareForPeriodic && probe.Diagnostics.PageState == expectedPageState;
     }
 
     private static string GetUnsafePreparationReason(AdapterIdleProbeResult probe)
@@ -1598,15 +1604,18 @@ public partial class MainWindow : Window
     {
         if (_stateMachine.State == GameMateState.Running)
         {
+            _periodicPendingCancellation?.Cancel();
+            _periodicSchedule.Stop();
             ApplyTrigger(GameMateTrigger.Pause);
             AddActivity(T("已暂停；不会累计空闲时间。", "Paused; idle time is not accumulated."));
         }
         else if (_stateMachine.State == GameMateState.Paused)
         {
             ApplyTrigger(GameMateTrigger.Resume);
+            ResetPeriodicTimer();
             AddActivity(T(
                 $"已恢复；重新等待连续 {_settings.ConversationIdleDelaySeconds} 秒空闲。",
-                $"Resumed; waiting for a fresh {_settings.ConversationIdleDelaySeconds}-second idle window."));
+                $"Resumed; the periodic interval restarts from now."));
         }
 
         UpdateUi();
@@ -1616,6 +1625,8 @@ public partial class MainWindow : Window
 
     private void StopRun()
     {
+        _periodicSchedule.Stop();
+        _periodicPendingCancellation?.Cancel();
         _runCancellation?.Cancel();
         if (_stateMachine.CanApply(GameMateTrigger.Stop))
         {
@@ -1786,7 +1797,7 @@ public partial class MainWindow : Window
         {
             RunStatusText.Text = T("只在请求时捕获已选择的 Kenshi 窗口。", "Ready: Send now captures the selected Kenshi window only. No periodic capture.");
         }
-        IdleDelayComboBox.IsEnabled = !_manualOnly;
+        UpdatePeriodicControls(state);
 
         _trayIcon?.Update(
             IsChinese,

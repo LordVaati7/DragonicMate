@@ -13,8 +13,8 @@ public partial class MainWindow
     {
         Title += " - Kenshi window";
         PrivacySummaryText.Text = T(
-            "仅捕获已选择的 Kenshi 窗口，不捕获整个桌面。此版本只按需发送。",
-            "Captures only the selected Kenshi window, even with GameMate in front. This version sends only on request; it never falls back to the desktop.");
+            "仅捕获已选择的 Kenshi 窗口。定时截图可选且默认关闭；不会捕获整个桌面。",
+            "Captures only the selected Kenshi window. Periodic captures are optional and off by default. No desktop fallback.");
         SelectKenshiButton.Content = T("选择 Kenshi 窗口", "Select Kenshi window");
         KenshiTargetText.Text = _capture.HasSelectedWindow
             ? T("已选择 Kenshi；请保持窗口打开且不要最小化。", "Kenshi selected. Keep the game window open and not minimized.")
@@ -34,7 +34,7 @@ public partial class MainWindow
             _capture.SelectWindow();
             KenshiTargetText.Text = T("已选择 Kenshi；不会捕获 GameMate 或整个桌面。",
                 "Kenshi selected. GameMate and the whole desktop are not capture targets.");
-            AddActivity(T("已选择 Kenshi 窗口；只按需捕获。", "Kenshi window selected; capture is on request only."));
+            AddActivity(T("已选择 Kenshi 窗口。", "Kenshi window selected."));
             _ = SafeLogAsync("capture.target-selected", DiagnosticLevel.Information, success: true);
         }
         catch (ScreenCaptureException exception)
@@ -57,8 +57,9 @@ public partial class MainWindow
         }
         if (_kenshiConsentConfirmed) return true;
         _kenshiConsentConfirmed = MessageBox.Show(this,
-            T("仅在点击立即发送或按快捷键时，捕获已选择的 Kenshi 窗口并发送到当前 ChatGPT 对话。游戏内显示的私人内容也可能被捕获。请保持游戏窗口打开且不要最小化；本版本不会自动截图。是否开始？",
-                "Send now or the hotkey will capture only the selected Kenshi window and send it to the current ChatGPT chat. Private content displayed inside the game can be included. Keep the game open and not minimized. Automatic capture is disabled. Start?"),
+            _manualOnly
+                ? "Send now or the hotkey captures only the selected Kenshi window and sends it to the current ChatGPT chat. Private content inside the game can be included. Periodic capture is OFF. Keep Kenshi open and not minimized. Start?"
+                : $"PERIODIC CAPTURE ENABLED: every {_periodicInterval.TotalMinutes:0} minutes, followed by 10 seconds of stable page and ChatGPT output-audio silence, capture the selected Kenshi window and send it to the current chat. Private content inside the game can be included. Microphone audio is not monitored; this cannot guarantee it detects when you are speaking. Manual capture remains available. Pause or Stop suspends captures. Keep Kenshi open and not minimized. Start?",
             "Dragonic Mate - Kenshi window", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes;
         return _kenshiConsentConfirmed;
     }

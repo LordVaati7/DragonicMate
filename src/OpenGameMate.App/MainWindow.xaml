@@ -273,6 +273,21 @@
                                            FontSize="12"
                                            TextWrapping="Wrap"
                                            Text="No window selected. Open Kenshi in windowed or borderless mode." />
+                                <CheckBox x:Name="PeriodicCaptureCheckBox"
+                                          Margin="0,0,0,7"
+                                          Content="Periodic captures (optional)"
+                                          Checked="PeriodicOptions_Changed"
+                                          Unchecked="PeriodicOptions_Changed" />
+                                <ComboBox x:Name="PeriodicIntervalComboBox"
+                                          HorizontalAlignment="Left"
+                                          Width="170" Height="30" Margin="0,0,0,9"
+                                          SelectedIndex="1"
+                                          SelectionChanged="PeriodicInterval_Changed">
+                                    <ComboBoxItem Tag="1" Content="Every 1 minute" />
+                                    <ComboBoxItem Tag="2" Content="Every 2 minutes" />
+                                    <ComboBoxItem Tag="5" Content="Every 5 minutes" />
+                                    <ComboBoxItem Tag="10" Content="Every 10 minutes" />
+                                </ComboBox>
                                 <TextBlock x:Name="RunInstructionText"
                                            Foreground="{StaticResource SecondaryTextBrush}"
                                            FontSize="12"

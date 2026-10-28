@@ -1,5 +1,28 @@
 # Dragonic Mate: prueba de captura exclusiva de Kenshi
 
+## Capturas periódicas opcionales
+
+Abre **Start-Kenshi.cmd** para usar el nuevo control **Periodic captures (optional)**.
+Está apagado al abrir la aplicación y la elección no se guarda. Los lanzadores
+Start-Voice-Check.cmd y Start-Image-Check.cmd mantienen forzado el modo manual.
+
+Antes de Start puedes activar la casilla y elegir 1, 2, 5 o 10 minutos. El valor
+inicial es 2 minutos; no hace falta decidir ahora el intervalo definitivo. Cada
+vencimiento espera además 10 segundos de página lista y silencio de salida de
+ChatGPT. Si continúa ocupado, esa ocasión caduca sin acumular capturas.
+
+**Send now** y el atajo siguen disponibles: una solicitud manual reinicia la espera
+completa, evitando una captura periódica justo después. Pause suspende el programa;
+Resume reinicia el intervalo completo. Stop detiene todo envío. Detén el modo antes
+de cambiar el intervalo o la casilla. Si una captura ya está en proceso no se duplica
+ni se interrumpe para iniciar otra; los pedidos simultáneos se rechazan sin cola.
+
+El programa observa audio de salida y controles permitidos de la página, no tu
+micrófono: no puede garantizar que detecte que tú estás hablando. Activa el modo
+solo si quieres probar este comportamiento. Conserva resolución y ajustes del juego.
+Para la primera comprobación, espera una captura periódica y luego pulsa Stop;
+verifica la imagen y continuidad de Voice. No son pruebas térmicas ni de carga.
+
 Esta versión experimental añade selección de una ventana de Kenshi. La interfaz
 se llama OpenGameMate y el título incluye `Kenshi window`. El envío de imagen y
 la conversación por Voice juntos ya tienen una primera validación del usuario
@@ -26,8 +49,8 @@ en la versión anterior. La captura de Kenshi, foco y rendimiento siguen pendien
 2. Pulsa **Send now** una sola vez y espera hasta 40 segundos.
 3. Confirma que la imagen enviada contiene el juego y no GameMate ni el escritorio.
    Pregunta por voz qué aparece; confirma que puedes seguir conversando.
-4. Pulsa **Stop**. No se enviarán imágenes periódicas: esta versión siempre es manual,
-   incluso al abrir el EXE directamente. El intervalo de espera queda desactivado.
+4. Pulsa **Stop**. Para esta prueba manual deja apagada la casilla de capturas
+   periódicas; los lanzadores de comprobación la mantienen desactivada.
 
 Si el juego se minimiza al cambiar de aplicación, usa ventana o sin bordes antes de
 seleccionarlo otra vez. El programa no restaura ventanas ni fuerza el foco. Una

@@ -5,7 +5,11 @@ OpenGameMate v0.1.0 is designed to minimize retained data.
 ## What the application processes
 
 - Only the explicitly selected Kenshi window, after the user starts companion mode
-  and requests a screenshot. This experimental revision disables periodic capture.
+  and requests a screenshot, or explicitly enables optional periodic captures before
+  Start. Periodic mode is off by default and the choice is not saved across launches.
+  Supported intervals are 1, 2, 5 and 10 minutes, initially 2 minutes. Each occurrence
+  additionally waits for a ready page and 10 seconds of stable ChatGPT output-audio
+  silence. This does not monitor microphone audio or guarantee the user is not speaking.
 - A single temporary PNG used for the current submission attempt.
 - User-selected role text and fixed automatic/manual screenshot prompts.
 - Local operational settings and privacy-safe diagnostic events.

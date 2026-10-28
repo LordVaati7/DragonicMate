@@ -32,11 +32,12 @@ public partial class MainWindow : Window
     }
 
     private readonly AppDataPaths _paths;
+    private bool _manualOnly;
+    private readonly bool _imageCheckOnly;
     private readonly IAppSettingsStore _settingsStore;
     private readonly IDiagnosticLogger _logger;
-    private readonly IPrimaryDisplayCapture _capture;
-    private readonly GameMateStateMachine _stateMachine = new();
-    private readonly AutomaticSendLoop _automaticSendLoop = new();
+    private readonly KenshiWindowCapture _capture;
+    private readonly GameMateStateMachine _stateMachine;
     private readonly AutomaticPendingSendSlot _automaticPendingSendSlot = new();
     private readonly SubmissionCoordinator _submissionCoordinator;
 
@@ -59,13 +60,17 @@ public partial class MainWindow : Window
     private bool _capturingHotKey;
     private bool _updatingIdleDelaySelection;
 
-    public MainWindow(AppDataPaths paths)
+    public MainWindow(AppDataPaths paths, bool manualOnly = false, bool imageCheckOnly = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
+        _imageCheckOnly = imageCheckOnly;
+        _manualOnly = true;
+        _forceManual = manualOnly || imageCheckOnly;
+        _stateMachine = new GameMateStateMachine(imageTestEnabled: imageCheckOnly);
         _settingsStore = new JsonAppSettingsStore(paths.SettingsFile);
         _logger = new JsonLineDiagnosticLogger(paths.LogsDirectory);
-        _capture = new PrimaryDisplayCapture(paths.TemporaryDirectory);
+        _capture = new KenshiWindowCapture(paths.TemporaryDirectory);
         _submissionCoordinator = new SubmissionCoordinator(DispatchSubmissionAsync);
         InitializeComponent();
     }
@@ -423,6 +428,17 @@ public partial class MainWindow : Window
             "请在右侧内嵌页面自行登录并开启 Voice，然后在这里确认。",
             "Sign in and start Voice in the embedded page, then confirm here.");
         ConfirmVoiceButton.Content = T("我已开启 Voice", "I started Voice");
+        if (_imageCheckOnly)
+        {
+            Title += " - Image test (no Voice)";
+            SubtitleText.Text = T("仅测试图片发送；未验证 Voice。", "Image submission test only; Voice is not validated.");
+            BrowserGroup.Header = T("1. 图片测试（不使用 Voice）", "1. Image test (no Voice)");
+            BrowserInstructionText.Text = T(
+                "登录 ChatGPT，关闭 Voice，清空输入区，然后确认图片测试。",
+                "Sign in to ChatGPT, leave Voice closed, empty the composer, then confirm the image test.");
+            ConfirmVoiceButton.Content = T("确认图片测试（无 Voice）", "Confirm image test (no Voice)");
+        }
+        ApplyKenshiCaptureLabels();
         BrowserPaneTitleText.Text = "ChatGPT";
         BrowserPaneCaptionText.Text = T(
             "内嵌网页 · 登录与 Voice 由你控制",
@@ -445,6 +461,12 @@ public partial class MainWindow : Window
         RunInstructionText.Text = T(
             $"ChatGPT 网页音频停止且页面空闲稳定 {idleDelaySeconds} 秒后，才截图并自动发送。",
             $"A screenshot is captured and sent only after ChatGPT web audio stops and the page remains idle for {idleDelaySeconds} seconds.");
+        if (_manualOnly)
+        {
+            RunInstructionText.Text = T(
+                "只在你点击立即发送或按快捷键时截图。自动截图已禁用。",
+                "Capture only when you select Send now or press the hotkey. Automatic capture is disabled.");
+        }
         StartButton.Content = T("开始陪玩", "Start");
         SendNowButton.Content = T("立即发送", "Send now");
         IdleDelayLabelText.Text = T("空闲等待", "Idle wait");
@@ -689,9 +711,12 @@ public partial class MainWindow : Window
 
         if (_stateMachine.State == GameMateState.BrowserReady)
         {
-            ApplyTrigger(GameMateTrigger.VoiceConfirmed);
-            AddActivity(T("Voice 已由用户确认。", "Voice was confirmed by the user."));
-            _ = SafeLogAsync("voice.user-confirmed", DiagnosticLevel.Information, success: true);
+            ApplyTrigger(_imageCheckOnly ? GameMateTrigger.ImageTestConfirmed : GameMateTrigger.VoiceConfirmed);
+            AddActivity(_imageCheckOnly
+                ? T("图片测试已由用户确认；未确认 Voice。", "Image test confirmed by the user; Voice was not confirmed.")
+                : T("Voice 已由用户确认。", "Voice was confirmed by the user."));
+            _ = SafeLogAsync(_imageCheckOnly ? "image-check.user-confirmed" : "voice.user-confirmed",
+                DiagnosticLevel.Information, success: true);
         }
 
         UpdateUi();
@@ -735,6 +760,12 @@ public partial class MainWindow : Window
         try
         {
             var preparation = await _adapter.PrepareTextAsync(text);
+            await SafeLogAsync(
+                "adapter.role-preparation",
+                preparation.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+                errorCode: preparation.Code,
+                success: preparation.Status == WebAdapterStatus.Succeeded,
+                adapterDiagnostics: preparation.Diagnostics);
             if (!preparation.TextInserted || preparation.Status != WebAdapterStatus.Succeeded)
             {
                 HandleAdapterFailure(preparation.Status, "role-prepare");
@@ -792,38 +823,7 @@ public partial class MainWindow : Window
         BeginRun(resetConversationTracker: true);
     }
 
-    private async Task<bool> ConfirmPrivacyBeforeFirstCaptureAsync()
-    {
-        if (!_settings.ShowPrivacyWarningOnFirstStart)
-        {
-            return true;
-        }
-
-        var result = MessageBox.Show(
-            this,
-            T(
-                $"OpenGameMate 会在 ChatGPT 网页音频停止且页面空闲连续稳定 {_settings.ConversationIdleDelaySeconds} 秒后，才捕获整个主显示器并发送到当前对话。画面可能包含通知、聊天、账号名或其他私人内容。请先关闭敏感窗口。独占全屏、受保护内容和反作弊环境可能黑屏或失败，程序不会绕过保护。\n\n是否理解风险并开始？",
-                $"OpenGameMate captures the entire primary display only after ChatGPT web audio stops and the page remains idle for {_settings.ConversationIdleDelaySeconds} seconds, then sends it to the current chat. Notifications, chats, account names, or other private content may be included. Close sensitive windows first. Exclusive fullscreen, protected content, and anti-cheat environments may fail or produce black frames; protections are not bypassed.\n\nDo you understand the risk and want to start?"),
-            T("整屏捕获隐私确认", "Full-display capture privacy confirmation"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-        if (result != MessageBoxResult.Yes)
-        {
-            return false;
-        }
-
-        _settings = _settings with { ShowPrivacyWarningOnFirstStart = false };
-        try
-        {
-            await _settingsStore.SaveAsync(_settings);
-        }
-        catch (Exception exception)
-        {
-            await ReportExceptionAsync("settings.save-failed", "privacy-setting", exception);
-        }
-
-        return true;
-    }
+    private Task<bool> ConfirmPrivacyBeforeFirstCaptureAsync() => Task.FromResult(ConfirmKenshiCapture());
 
     private void BeginRun(bool resetConversationTracker)
     {
@@ -841,10 +841,16 @@ public partial class MainWindow : Window
         _runCancellation?.Cancel();
         _runCancellation?.Dispose();
         _runCancellation = new CancellationTokenSource();
-        _automaticLoopTask = RunAutomaticLoopAsync(_runCancellation.Token);
+        _automaticLoopTask = _manualOnly ? Task.CompletedTask : RunAutomaticLoopAsync(_runCancellation.Token);
+        if (_manualOnly)
+        {
+            AddActivity(T("手动验证模式：不会自动截图或发送。", "Manual validation mode: automatic capture and sending are disabled."));
+            UpdateUi();
+            return;
+        }
         AddActivity(T(
             $"陪玩已开始；网页音频停止且页面空闲稳定 {_settings.ConversationIdleDelaySeconds} 秒后自动发送。",
-            $"Companion mode started; automatic capture waits for {_settings.ConversationIdleDelaySeconds} seconds of stable page and web-audio silence."));
+            $"Periodic capture enabled: {_periodicInterval.TotalMinutes:0} minutes plus a safe idle wait."));
         _ = SafeLogAsync("run.started", DiagnosticLevel.Information, success: true);
         UpdateUi();
     }
@@ -853,11 +859,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            await _automaticSendLoop.RunAsync(
-                () => _stateMachine.State == GameMateState.Running,
-                ObserveConversationIdleAsync,
-                ProcessAutomaticOccurrenceAsync,
-                cancellationToken);
+            await RunPeriodicCaptureLoopAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -886,7 +888,7 @@ public partial class MainWindow : Window
         var probe = await _adapter.ProbeIdleAsync(cancellationToken);
         if (probe.Status != WebAdapterStatus.AdapterInvalid)
         {
-            return probe.IsSafeToPrepare;
+            return probe.IsSafeToPrepareForPeriodic;
         }
 
         await SafeLogAsync(
@@ -917,7 +919,7 @@ public partial class MainWindow : Window
                 scheduledAt,
                 createdAt,
                 out var pending,
-                SelectedConversationIdleDelay) ||
+                TimeSpan.FromSeconds(10)) ||
             pending is null)
         {
             await SafeLogAsync(
@@ -956,6 +958,12 @@ public partial class MainWindow : Window
 
             _dispatchingAutomaticPending = pending;
             var result = await _submissionCoordinator.RunAutomaticAsync(cancellationToken);
+            if (result.Status == SubmissionDispatchStatus.Executed &&
+                result.Outcome == SubmissionOutcome.OrdinaryFailure && _stateMachine.State == GameMateState.Running)
+            {
+                AddActivity("Periodic capture stopped after an unsuccessful attempt. Inspect the chat before restarting.");
+                StopRun();
+            }
             if (result.Status != SubmissionDispatchStatus.Executed)
             {
                 await SafeLogAsync(
@@ -1021,13 +1029,13 @@ public partial class MainWindow : Window
                 ? "audio-unknown"
                 : audio.IsPlaying
                     ? "audio-playing"
-                    : !probe.IsSafeToPrepare
+                    : !probe.IsSafeToPrepareForPeriodic
                         ? GetUnsafePreparationReason(probe)
                         : "idle-stabilizing";
             var previousCandidate = pending.IdleCandidateAt;
             var observation = pending.Observe(
                 observedAt,
-                probe.IsSafeToPrepare,
+                probe.IsSafeToPrepareForPeriodic,
                 audioSilent,
                 audio.SilentDuration,
                 deferredReason);
@@ -1118,7 +1126,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        ResetPeriodicTimer();
         var result = await _submissionCoordinator.RunManualAsync(_runCancellation?.Token ?? CancellationToken.None);
+        if (_stateMachine.State == GameMateState.Running) ResetPeriodicTimer();
         if (result.Status != SubmissionDispatchStatus.Executed)
         {
             AddActivity(T("当前已有发送任务；手动请求未排队。", "A submission is active; the manual request was not queued."));
@@ -1168,6 +1178,7 @@ public partial class MainWindow : Window
             AddActivity(T(
                 $"截图失败：{exception.Code}。独占全屏可尝试无边框模式。",
                 $"Capture failed: {exception.Code}. Try borderless mode for exclusive fullscreen."));
+            if (!_manualOnly) StopRun();
         }
         catch (Exception exception)
         {
@@ -1213,6 +1224,12 @@ public partial class MainWindow : Window
             ? CompanionPrompts.ManualScreenshot(PromptLanguage)
             : CompanionPrompts.AutomaticScreenshot(PromptLanguage);
         var preparation = await _adapter!.PrepareInputAsync(capture.Path, message, cancellationToken);
+        await SafeLogAsync(
+            "adapter.input-preparation",
+            preparation.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+            errorCode: preparation.Code,
+            success: preparation.Status == WebAdapterStatus.Succeeded,
+            adapterDiagnostics: preparation.Diagnostics);
         if (preparation.Status != WebAdapterStatus.Succeeded ||
             !preparation.ImageAdded ||
             !preparation.TextInserted)
@@ -1292,6 +1309,12 @@ public partial class MainWindow : Window
             pendingCreatedAt: pending.PendingCreatedAt,
             attachStartedAt: attachStartedAt);
         var attachment = await _adapter!.PrepareImageAsync(capture.Path, cancellationToken);
+        await SafeLogAsync(
+            "adapter.image-preparation",
+            attachment.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+            errorCode: attachment.Code,
+            success: attachment.Status == WebAdapterStatus.Succeeded,
+            adapterDiagnostics: attachment.Diagnostics);
         if (attachment.Status != WebAdapterStatus.Succeeded || !attachment.ImageAdded)
         {
             return MapAdapterStatus(attachment.Status);
@@ -1318,6 +1341,12 @@ public partial class MainWindow : Window
 
         var message = CompanionPrompts.AutomaticScreenshot(PromptLanguage);
         var text = await _adapter.PrepareTextAsync(message, cancellationToken);
+        await SafeLogAsync(
+            "adapter.text-preparation",
+            text.Status == WebAdapterStatus.Succeeded ? DiagnosticLevel.Information : DiagnosticLevel.Warning,
+            errorCode: text.Code,
+            success: text.Status == WebAdapterStatus.Succeeded,
+            adapterDiagnostics: text.Diagnostics);
         var textSetAt = DateTimeOffset.UtcNow;
         if (text.Status != WebAdapterStatus.Succeeded || !text.TextInserted)
         {
@@ -1327,6 +1356,7 @@ public partial class MainWindow : Window
         var expectedPreparedPageState = expectedPageState.Value switch
         {
             AdapterPageState.Composer => AdapterPageState.ComposerWithAttachment,
+            AdapterPageState.VoiceComposer => AdapterPageState.VoiceComposerWithAttachment,
             _ => AdapterPageState.Unknown,
         };
         if (expectedPreparedPageState == AdapterPageState.Unknown)
@@ -1425,7 +1455,7 @@ public partial class MainWindow : Window
         }
 
         var probe = await _adapter.ProbeIdleAsync(cancellationToken);
-        return probe.IsSafeToPrepare && probe.Diagnostics.PageState == expectedPageState;
+        return probe.IsSafeToPrepareForPeriodic && probe.Diagnostics.PageState == expectedPageState;
     }
 
     private static string GetUnsafePreparationReason(AdapterIdleProbeResult probe)
@@ -1499,6 +1529,7 @@ public partial class MainWindow : Window
 
     private static SubmissionOutcome MapAdapterStatus(WebAdapterStatus status) => status switch
     {
+        WebAdapterStatus.OutcomeUnknown => SubmissionOutcome.OutcomeUnknown,
         WebAdapterStatus.QuotaReached => SubmissionOutcome.QuotaReached,
         WebAdapterStatus.AdapterInvalid => SubmissionOutcome.AdapterInvalid,
         _ => SubmissionOutcome.OrdinaryFailure,
@@ -1523,6 +1554,14 @@ public partial class MainWindow : Window
                 _runCancellation?.Cancel();
                 AddActivity(T("检测到图片额度限制，已进入纯语音模式，不会重试或新建对话绕过限制。", "Image quota was detected. Voice-only mode is active; no retry or new-chat bypass will be attempted."));
                 _trayIcon?.Notify("OpenGameMate", T("已进入纯语音模式。", "Voice-only mode is active."));
+                break;
+            case SubmissionOutcome.OutcomeUnknown:
+                ApplyTrigger(GameMateTrigger.AdapterInvalid);
+                _runCancellation?.Cancel();
+                AddActivity(T(
+                    "发送结果无法确认，已暂停。请检查 ChatGPT 对话；不要直接重发。",
+                    "Send result is unconfirmed; paused. Check the ChatGPT conversation before sending again."));
+                _trayIcon?.Notify("OpenGameMate", T("发送结果无法确认，已暂停。", "Send unconfirmed; paused."));
                 break;
             case SubmissionOutcome.AdapterInvalid:
                 ApplyTrigger(GameMateTrigger.AdapterInvalid);
@@ -1565,15 +1604,18 @@ public partial class MainWindow : Window
     {
         if (_stateMachine.State == GameMateState.Running)
         {
+            _periodicPendingCancellation?.Cancel();
+            _periodicSchedule.Stop();
             ApplyTrigger(GameMateTrigger.Pause);
             AddActivity(T("已暂停；不会累计空闲时间。", "Paused; idle time is not accumulated."));
         }
         else if (_stateMachine.State == GameMateState.Paused)
         {
             ApplyTrigger(GameMateTrigger.Resume);
+            ResetPeriodicTimer();
             AddActivity(T(
                 $"已恢复；重新等待连续 {_settings.ConversationIdleDelaySeconds} 秒空闲。",
-                $"Resumed; waiting for a fresh {_settings.ConversationIdleDelaySeconds}-second idle window."));
+                $"Resumed; the periodic interval restarts from now."));
         }
 
         UpdateUi();
@@ -1583,6 +1625,8 @@ public partial class MainWindow : Window
 
     private void StopRun()
     {
+        _periodicSchedule.Stop();
+        _periodicPendingCancellation?.Cancel();
         _runCancellation?.Cancel();
         if (_stateMachine.CanApply(GameMateTrigger.Stop))
         {
@@ -1611,7 +1655,9 @@ public partial class MainWindow : Window
 
         _adapter = new ChatGptWebAdapter(_browserSession, ChatGptAdapterRules.BuiltIn);
         ApplyTrigger(GameMateTrigger.AdapterRecovered);
-        AddActivity(T("已重新加载内置规则。请确认 Voice 后再开始；若仍失败请导出诊断。", "Built-in rules reloaded. Confirm Voice before restarting; export diagnostics if it still fails."));
+        AddActivity(_imageCheckOnly
+            ? T("规则已重新加载；请再次确认图片测试。", "Rules reloaded; confirm the image test again.")
+            : T("已重新加载内置规则。请确认 Voice 后再开始；若仍失败请导出诊断。", "Built-in rules reloaded. Confirm Voice before restarting; export diagnostics if it still fails."));
         UpdateUi();
     }
 
@@ -1720,12 +1766,13 @@ public partial class MainWindow : Window
                 : T("尚未打开", "Not opened");
         ConfirmVoiceButton.IsEnabled = browserAvailable &&
             state is GameMateState.BrowserReady or GameMateState.Stopped or GameMateState.Idle;
-        var canSendRole = !_auxiliaryOperation && _adapter is not null &&
+        var canSendRole = !_imageCheckOnly && !_auxiliaryOperation && _adapter is not null &&
             state is GameMateState.BrowserReady or GameMateState.Ready or GameMateState.Paused;
         SendFullRoleButton.IsEnabled = canSendRole;
         SendShortRoleButton.IsEnabled = canSendRole;
         NewConversationButton.IsEnabled = state is GameMateState.Ready or GameMateState.Running or GameMateState.Paused;
-        StartButton.IsEnabled = state == GameMateState.Ready && !_auxiliaryOperation;
+        StartButton.IsEnabled = state == GameMateState.Ready && !_auxiliaryOperation && _capture.HasSelectedWindow;
+        SelectKenshiButton.IsEnabled = !_auxiliaryOperation && state is not (GameMateState.Running or GameMateState.Sending or GameMateState.Paused);
         SendNowButton.IsEnabled = state == GameMateState.Running;
         PauseResumeButton.IsEnabled = state is GameMateState.Running or GameMateState.Paused;
         PauseResumeButton.Content = state == GameMateState.Paused
@@ -1734,6 +1781,23 @@ public partial class MainWindow : Window
         StopButton.IsEnabled = IsRunRelatedState(state) || state == GameMateState.AdapterError;
         RetryAdapterButton.IsEnabled = state == GameMateState.AdapterError;
         RunStatusText.Text = StateDescription(state);
+        if (_imageCheckOnly)
+        {
+            RunStatusText.Text = state switch
+            {
+                GameMateState.BrowserReady => T("请登录并确认图片测试。", "Sign in, then confirm the image test."),
+                GameMateState.Ready => T("图片测试已确认；点击开始。", "Image test confirmed; select Start."),
+                GameMateState.Running => T("仅手动发送图片；未使用 Voice。", "Manual image test active; Voice is not in use."),
+                GameMateState.VoiceOnly => T("图片额度受限，已停止截图。", "Image quota reached; capture is stopped."),
+                GameMateState.Stopped => T("已停止；再次确认图片测试可重新开始。", "Stopped; confirm the image test again to restart."),
+                _ => RunStatusText.Text,
+            };
+        }
+        if (_manualOnly && state == GameMateState.Running)
+        {
+            RunStatusText.Text = T("只在请求时捕获已选择的 Kenshi 窗口。", "Ready: Send now captures the selected Kenshi window only. No periodic capture.");
+        }
+        UpdatePeriodicControls(state);
 
         _trayIcon?.Update(
             IsChinese,

@@ -29,6 +29,16 @@ public sealed class PrimaryDisplayCapture : IPrimaryDisplayCapture
 
     private readonly SemaphoreSlim _captureGate = new(1, 1);
     private readonly string _workingScreenshotPath;
+    private readonly Func<GraphicsCaptureItem>? _sourceFactory;
+    private readonly Action? _validateSource;
+
+    internal PrimaryDisplayCapture(string temporaryDirectory,
+        Func<GraphicsCaptureItem> sourceFactory, Action validateSource)
+        : this(temporaryDirectory)
+    {
+        _sourceFactory = sourceFactory;
+        _validateSource = validateSource;
+    }
 
     public PrimaryDisplayCapture(string? temporaryDirectory = null)
     {
@@ -60,6 +70,7 @@ public sealed class PrimaryDisplayCapture : IPrimaryDisplayCapture
         try
         {
             DeleteFileIfPresent(_workingScreenshotPath);
+            _validateSource?.Invoke();
 
             if (!GraphicsCaptureSession.IsSupported())
             {
@@ -68,15 +79,23 @@ public sealed class PrimaryDisplayCapture : IPrimaryDisplayCapture
                     "Windows Graphics Capture is not supported on this system.");
             }
 
-            var monitor = MonitorFromPoint(default, MonitorDefaultToPrimary);
-            if (monitor == nint.Zero)
+            GraphicsCaptureItem item;
+            if (_sourceFactory is not null)
             {
-                throw new ScreenCaptureException(
-                    CaptureFailureCode.PrimaryMonitorUnavailable,
-                    "Unable to resolve the Windows primary monitor.");
+                // Window mode never resolves a monitor or falls back to the desktop.
+                item = _sourceFactory();
             }
-
-            var item = CreateItemForMonitor(monitor);
+            else
+            {
+                var monitor = MonitorFromPoint(default, MonitorDefaultToPrimary);
+                if (monitor == nint.Zero)
+                {
+                    throw new ScreenCaptureException(
+                        CaptureFailureCode.PrimaryMonitorUnavailable,
+                        "Unable to resolve the Windows primary monitor.");
+                }
+                item = CreateItem(monitor, forWindow: false);
+            }
             var sourceWidth = item.Size.Width;
             var sourceHeight = item.Size.Height;
             if (sourceWidth <= 0 || sourceHeight <= 0)
@@ -113,6 +132,13 @@ public sealed class PrimaryDisplayCapture : IPrimaryDisplayCapture
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(FrameTimeout);
                 using var frame = await frameSource.Task.WaitAsync(timeout.Token);
+                _validateSource?.Invoke();
+                if (_sourceFactory is not null &&
+                    (frame.ContentSize.Width != sourceWidth || frame.ContentSize.Height != sourceHeight))
+                {
+                    throw new ScreenCaptureException(CaptureFailureCode.SourceChanged,
+                        "The selected window changed size; select it again before retrying.");
+                }
                 using var bitmap = await SoftwareBitmap.CreateCopyFromSurfaceAsync(frame.Surface);
                 var output = CalculateOutputSize(
                     sourceWidth,
@@ -120,6 +146,8 @@ public sealed class PrimaryDisplayCapture : IPrimaryDisplayCapture
                     MaximumOutputWidth,
                     MaximumOutputHeight);
                 await SavePngAsync(bitmap, output.Width, output.Height, _workingScreenshotPath);
+                cancellationToken.ThrowIfCancellationRequested();
+                _validateSource?.Invoke();
                 File.Move(_workingScreenshotPath, TemporaryScreenshotPath, overwrite: true);
 
                 var fileBytes = new FileInfo(TemporaryScreenshotPath).Length;
@@ -270,7 +298,7 @@ public sealed class PrimaryDisplayCapture : IPrimaryDisplayCapture
         }
     }
 
-    private static unsafe GraphicsCaptureItem CreateItemForMonitor(nint monitor)
+    internal static unsafe GraphicsCaptureItem CreateItem(nint source, bool forWindow)
     {
         nint className = nint.Zero;
         nint factory = nint.Zero;
@@ -287,10 +315,10 @@ public sealed class PrimaryDisplayCapture : IPrimaryDisplayCapture
             Marshal.ThrowExceptionForHR(RoGetActivationFactory(className, ref interopId, out factory));
 
             var vtable = *(nint**)factory;
-            var createForMonitor =
-                (delegate* unmanaged[Stdcall]<nint, nint, Guid*, nint*, int>)vtable[4];
+            var createItem =
+                (delegate* unmanaged[Stdcall]<nint, nint, Guid*, nint*, int>)vtable[forWindow ? 3 : 4];
             var itemId = GraphicsCaptureItemInterfaceId;
-            Marshal.ThrowExceptionForHR(createForMonitor(factory, monitor, &itemId, &itemPointer));
+            Marshal.ThrowExceptionForHR(createItem(factory, source, &itemId, &itemPointer));
 
             return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemPointer);
         }

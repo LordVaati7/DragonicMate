@@ -49,3 +49,10 @@ appsettings.Local.json
 appsettings.Development.json
 settings.local.json
 local.settings.json
+
+# Synthetic browser tests (installed on CI, never required on the player's PC)
+**/node_modules/
+
+# Portable runtime data, including WebView2 session data
+data/
+WebView2/

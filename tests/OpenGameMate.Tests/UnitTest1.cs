@@ -116,10 +116,10 @@ public class Phase0UnitTests
     }
 
     [Theory]
-    [InlineData(true, false, true)]
+    [InlineData(true, false, false)]
     [InlineData(false, true, true)]
     [InlineData(false, false, false)]
-    public void InputPreparationResult_AcceptsFileSelectionOrVerifiedPreview(
+    public void InputPreparationResult_RequiresPreviewInsteadOfFileSelectionAlone(
         bool fileSelected,
         bool previewDetected,
         bool expected)
@@ -357,6 +357,7 @@ public class Phase0UnitTests
         Assert.False((idle with { SendButtonInComposerForm = false }).IsIdle);
         Assert.False((idle with { StopButtonCount = 1 }).IsIdle);
         Assert.False((idle with { ComposerCount = 2 }).IsIdle);
+        Assert.False((idle with { ComposerEmpty = false }).IsSafeToPrepare);
         Assert.False((idle with { StopButtonCount = 1 }).IsSafeToPrepare);
         Assert.False((idle with { SendButtonCount = 2 }).IsSafeToPrepare);
         Assert.False((idle with

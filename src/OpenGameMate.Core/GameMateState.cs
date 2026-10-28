@@ -28,7 +28,8 @@ public enum GameMateTrigger
     AdapterRecovered,
     BrowserClosed,
     Stop,
-    Reset
+    Reset,
+    ImageTestConfirmed
 }
 
 public sealed record StateTransition(

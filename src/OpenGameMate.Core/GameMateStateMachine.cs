@@ -9,6 +9,7 @@ public sealed class GameMateStateMachine
             [(GameMateState.Idle, GameMateTrigger.Stop)] = GameMateState.Stopped,
 
             [(GameMateState.BrowserReady, GameMateTrigger.VoiceConfirmed)] = GameMateState.Ready,
+            [(GameMateState.BrowserReady, GameMateTrigger.ImageTestConfirmed)] = GameMateState.Ready,
             [(GameMateState.BrowserReady, GameMateTrigger.AdapterInvalid)] = GameMateState.AdapterError,
             [(GameMateState.BrowserReady, GameMateTrigger.BrowserClosed)] = GameMateState.Idle,
             [(GameMateState.BrowserReady, GameMateTrigger.Stop)] = GameMateState.Stopped,
@@ -47,11 +48,13 @@ public sealed class GameMateStateMachine
         };
 
     private readonly object _sync = new();
+    private readonly bool _imageTestEnabled;
     private GameMateState _state;
 
-    public GameMateStateMachine(GameMateState initialState = GameMateState.Idle)
+    public GameMateStateMachine(GameMateState initialState = GameMateState.Idle, bool imageTestEnabled = false)
     {
         _state = initialState;
+        _imageTestEnabled = imageTestEnabled;
     }
 
     public event EventHandler<GameMateStateChangedEventArgs>? StateChanged;
@@ -71,7 +74,7 @@ public sealed class GameMateStateMachine
     {
         lock (_sync)
         {
-            return Transitions.ContainsKey((_state, trigger));
+            return IsTriggerEnabled(trigger) && Transitions.ContainsKey((_state, trigger));
         }
     }
 
@@ -80,7 +83,7 @@ public sealed class GameMateStateMachine
         StateTransition transition;
         lock (_sync)
         {
-            if (!Transitions.TryGetValue((_state, trigger), out var nextState))
+            if (!IsTriggerEnabled(trigger) || !Transitions.TryGetValue((_state, trigger), out var nextState))
             {
                 throw new InvalidStateTransitionException(_state, trigger);
             }
@@ -98,7 +101,7 @@ public sealed class GameMateStateMachine
         StateTransition appliedTransition;
         lock (_sync)
         {
-            if (!Transitions.TryGetValue((_state, trigger), out var nextState))
+            if (!IsTriggerEnabled(trigger) || !Transitions.TryGetValue((_state, trigger), out var nextState))
             {
                 transition = null;
                 return false;
@@ -112,4 +115,11 @@ public sealed class GameMateStateMachine
         StateChanged?.Invoke(this, new GameMateStateChangedEventArgs(appliedTransition));
         return true;
     }
+
+    private bool IsTriggerEnabled(GameMateTrigger trigger) => trigger switch
+    {
+        GameMateTrigger.ImageTestConfirmed => _imageTestEnabled,
+        GameMateTrigger.VoiceConfirmed => !_imageTestEnabled,
+        _ => true,
+    };
 }

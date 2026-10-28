@@ -1,5 +1,5 @@
-using System.Text.Json;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using OpenGameMate.Browser;
 using OpenGameMate.Core;
 
@@ -7,28 +7,13 @@ namespace OpenGameMate.Adapters;
 
 public interface IAiWebAdapter
 {
-    Task<InputPreparationResult> PrepareImageAsync(
-        string imagePath,
-        CancellationToken cancellationToken = default);
-
-    Task<TextPreparationResult> PrepareTextAsync(
-        string message,
-        CancellationToken cancellationToken = default);
-
-    Task<InputPreparationResult> PrepareInputAsync(
-        string imagePath,
-        string message,
-        CancellationToken cancellationToken = default);
-
+    Task<InputPreparationResult> PrepareImageAsync(string imagePath, CancellationToken cancellationToken = default);
+    Task<TextPreparationResult> PrepareTextAsync(string message, CancellationToken cancellationToken = default);
+    Task<InputPreparationResult> PrepareInputAsync(string imagePath, string message, CancellationToken cancellationToken = default);
     Task<SubmissionResult> SubmitAsync(CancellationToken cancellationToken = default);
-
     Task<AdapterIdleProbeResult> ProbeIdleAsync(CancellationToken cancellationToken = default);
-
-    Task<SubmissionResult> SubmitPreparedInputOnceAsync(
-        long expectedAudioStateVersion,
-        TimeSpan requiredSilentDuration,
-        AdapterPageState expectedPageState,
-        CancellationToken cancellationToken = default);
+    Task<SubmissionResult> SubmitPreparedInputOnceAsync(long expectedAudioStateVersion,
+        TimeSpan requiredSilentDuration, AdapterPageState expectedPageState, CancellationToken cancellationToken = default);
 }
 
 public enum SubmitControlDecision
@@ -40,19 +25,25 @@ public enum SubmitControlDecision
 
 public sealed class ChatGptWebAdapter : IAiWebAdapter
 {
-    private const string FileInputMarker = "data-opengamemate-file";
     private const int MaximumDiagnosticButtonCandidates = 12;
-    private const int MaximumDiagnosticScopeDepth = 8;
-    private const int SubmitControlPollAttempts = 120;
-    private const int SubmitControlPollIntervalMilliseconds = 250;
+    private const int PollAttempts = 120;
+    private const int PollIntervalMilliseconds = 250;
     private const int MaximumMessageCharacters = 8000;
     private const long MaximumImageBytes = 20 * 1024 * 1024;
+    private static readonly Lazy<string> ComposerScript = new(() =>
+    {
+        using var stream = typeof(ChatGptWebAdapter).Assembly.GetManifestResourceStream(
+            "OpenGameMate.Adapters.ChatGptComposer.js")
+            ?? throw new InvalidOperationException("The embedded composer adapter is missing.");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    });
     private readonly ChatGptBrowserSession _session;
     private readonly ChatGptAdapterRules _rules;
+    private string? _operationId;
+    private bool _imagePrepared;
 
-    public ChatGptWebAdapter(
-        ChatGptBrowserSession session,
-        ChatGptAdapterRules? rules = null)
+    public ChatGptWebAdapter(ChatGptBrowserSession session, ChatGptAdapterRules? rules = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         _session = session;
@@ -61,964 +52,334 @@ public sealed class ChatGptWebAdapter : IAiWebAdapter
     }
 
     public async Task<InputPreparationResult> PrepareInputAsync(
-        string imagePath,
-        string message,
-        CancellationToken cancellationToken = default)
+        string imagePath, string message, CancellationToken cancellationToken = default)
     {
-        try
-        {
-            return await PrepareInputCoreAsync(imagePath, message, insertText: true, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (
-            exception is InvalidOperationException or JsonException or IOException or
-                UnauthorizedAccessException or COMException)
-        {
-            return new(false, false, false, "adapter-operation-failed", WebAdapterStatus.AdapterInvalid);
-        }
-    }
-
-    public async Task<InputPreparationResult> PrepareImageAsync(
-        string imagePath,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return await PrepareInputCoreAsync(imagePath, message: null, insertText: false, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (
-            exception is InvalidOperationException or JsonException or IOException or
-                UnauthorizedAccessException or COMException)
-        {
-            return new(false, false, false, "adapter-operation-failed", WebAdapterStatus.AdapterInvalid);
-        }
-    }
-
-    private async Task<InputPreparationResult> PrepareInputCoreAsync(
-        string imagePath,
-        string? message,
-        bool insertText,
-        CancellationToken cancellationToken)
-    {
-        if (!_session.IsInitialized || !_session.IsOnChatGpt())
-        {
-            return new(false, false, false, "not-on-chatgpt", WebAdapterStatus.NotReady);
-        }
-
-        if (insertText && (message is null || !IsMessageValid(message)))
+        if (!IsMessageValid(message))
         {
             return new(false, false, false, "message-invalid", WebAdapterStatus.InvalidInput);
         }
 
-        if (!File.Exists(imagePath))
+        var image = await PrepareImageAsync(imagePath, cancellationToken);
+        if (image.Status != WebAdapterStatus.Succeeded)
         {
-            return new(false, false, false, "image-file-missing", WebAdapterStatus.InvalidInput);
+            return image;
         }
 
-        var imageLength = new FileInfo(imagePath).Length;
-        if (imageLength is <= 0 or > MaximumImageBytes)
+        var text = await PrepareTextAsync(message, cancellationToken);
+        return image with
         {
-            return new(false, false, false, "image-file-size-invalid", WebAdapterStatus.InvalidInput);
-        }
+            TextInserted = text.TextInserted,
+            Code = text.Code,
+            Status = text.Status,
+            Diagnostics = text.Diagnostics
+        };
+    }
 
-        var fileInputSelectorJson = JsonSerializer.Serialize(_rules.FileInputSelector);
-        var composerSelectorJson = JsonSerializer.Serialize(_rules.ComposerSelector);
-        var previewSelectorsJson = JsonSerializer.Serialize(_rules.AttachmentPreviewSelectors);
-        var quotaSelectorsJson = JsonSerializer.Serialize(_rules.QuotaErrorSelectors);
-        var platformErrorSelectorsJson = JsonSerializer.Serialize(_rules.PlatformErrorSelectors);
-
-        var locateFileInput = await EvaluateAsync(
-            $$"""
-            (() => {
-              if (!(location.hostname === 'chatgpt.com' || location.hostname.endsWith('.chatgpt.com'))) {
-                return { code: 'unexpected-origin', count: 0 };
-              }
-              document.querySelectorAll('input[{{FileInputMarker}}]')
-                .forEach(element => element.removeAttribute('{{FileInputMarker}}'));
-              const candidates = [...document.querySelectorAll({{fileInputSelectorJson}})]
-                .filter(element => !element.disabled &&
-                  (!element.accept || /image|png|jpe?g|gif/i.test(element.accept)));
-              if (candidates.length !== 1) {
-                return { code: 'file-input-count', count: candidates.length };
-              }
-              candidates[0].setAttribute('{{FileInputMarker}}', 'true');
-              return { code: 'ok', count: 1 };
-            })()
-            """);
-
-        var attachmentMethod = "file-input";
-        JsonElement attachmentResult;
-        if (GetCode(locateFileInput) == "ok")
+    public async Task<InputPreparationResult> PrepareImageAsync(
+        string imagePath, CancellationToken cancellationToken = default)
+    {
+        _imagePrepared = false;
+        _operationId = Guid.NewGuid().ToString("N");
+        try
         {
-            using var documentResponse = await CallCdpAsync("DOM.getDocument", new { depth = 1, pierce = true });
-            var rootNodeId = documentResponse.RootElement
-                .GetProperty("root")
-                .GetProperty("nodeId")
-                .GetInt32();
-
-            using var queryResponse = await CallCdpAsync(
-                "DOM.querySelector",
-                new { nodeId = rootNodeId, selector = $"input[{FileInputMarker}=\"true\"]" });
-            var fileNodeId = queryResponse.RootElement.GetProperty("nodeId").GetInt32();
-            if (fileNodeId == 0)
+            if (!IsReady()) return new(false, false, false, "not-on-chatgpt", WebAdapterStatus.NotReady);
+            if (!File.Exists(imagePath)) return new(false, false, false, "image-file-missing", WebAdapterStatus.InvalidInput);
+            if (new FileInfo(imagePath).Length is <= 0 or > MaximumImageBytes)
             {
-                return new(false, false, false, "marked-file-input-not-found", WebAdapterStatus.AdapterInvalid);
+                return new(false, false, false, "image-file-size-invalid", WebAdapterStatus.InvalidInput);
             }
 
-            using (await CallCdpAsync(
-                "DOM.setFileInputFiles",
-                new { files = new[] { Path.GetFullPath(imagePath) }, nodeId = fileNodeId }))
+            var located = await EvaluateActionAsync("begin", requireImage: true);
+            var method = ReadBoundedString(located, "method", 32);
+            if (method is null || IsPlatformBlocked(located))
             {
+                return ImageResult(located, PreparationFailureStatus(located));
             }
 
-            attachmentResult = await EvaluateAsync(
-                $$"""
-                (() => {
-                  const fileInput = document.querySelector('input[{{FileInputMarker}}="true"]');
-                  if (!fileInput) return { code: 'file-input-lost', fileSelected: false };
-                  fileInput.dispatchEvent(new Event('input', { bubbles: true }));
-                  fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-                  return { code: 'file-input-events', fileSelected: fileInput.files?.length === 1 };
-                })()
-                """);
+            if (method == "file-input")
+            {
+                using var document = await CallCdpAsync("DOM.getDocument", new { depth = 1, pierce = true });
+                var rootId = document.RootElement.GetProperty("root").GetProperty("nodeId").GetInt32();
+                using var query = await CallCdpAsync("DOM.querySelector", new
+                {
+                    nodeId = rootId,
+                    selector = $"input[data-opengamemate-file=\"{_operationId}\"]",
+                });
+                var fileNodeId = query.RootElement.GetProperty("nodeId").GetInt32();
+                if (fileNodeId == 0)
+                {
+                    return new(false, false, false, "marked-file-input-lost", WebAdapterStatus.AdapterInvalid);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                using (await CallCdpAsync("DOM.setFileInputFiles", new
+                {
+                    files = new[] { Path.GetFullPath(imagePath) },
+                    nodeId = fileNodeId,
+                }))
+                {
+                }
+                var selected = await EvaluateActionAsync("file-events");
+                if (GetCode(selected) != "file-selected") return ImageResult(selected, PreparationFailureStatus(selected));
+            }
+            else
+            {
+                var bytes = await File.ReadAllBytesAsync(imagePath, cancellationToken);
+                var pasted = await EvaluateActionAsync("paste", imageBase64: Convert.ToBase64String(bytes));
+                if (GetCode(pasted) != "paste-dispatched") return ImageResult(pasted, PreparationFailureStatus(pasted));
+            }
+
+            for (var attempt = 0; attempt < PollAttempts; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var probe = await EvaluateActionAsync("attachment");
+                if (IsPlatformBlocked(probe) || GetCode(probe) != "attachment-observed")
+                {
+                    return ImageResult(probe, PreparationFailureStatus(probe));
+                }
+                if (GetBoolean(probe, "previewDetected") && !GetBoolean(probe, "uploading"))
+                {
+                    _imagePrepared = true;
+                    return ImageResult(probe, WebAdapterStatus.Succeeded) with { Code = $"{method}-preview-ready" };
+                }
+                await Task.Delay(PollIntervalMilliseconds, cancellationToken);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            var timeout = await EvaluateActionAsync("attachment-timeout");
+            return ImageResult(timeout, PreparationFailureStatus(timeout));
         }
-        else if (GetCode(locateFileInput) == "file-input-count")
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // The current ChatGPT composer can omit a persistent file input. A paste event is
-            // the narrow fallback: it targets only the composer and never opens a native picker.
-            attachmentMethod = "composer-paste";
-            var imageBase64Json = JsonSerializer.Serialize(
-                Convert.ToBase64String(await File.ReadAllBytesAsync(imagePath, cancellationToken)));
-            attachmentResult = await EvaluateAsync(
-                $$"""
-                (async () => {
-                  const composers = [...document.querySelectorAll({{composerSelectorJson}})]
-                    .filter(element => !element.hasAttribute('disabled'));
-                  if (composers.length !== 1) {
-                    return { code: 'composer-count-before-paste', count: composers.length,
-                      fileSelected: false };
-                  }
-
-                  const binary = atob({{imageBase64Json}});
-                  const bytes = new Uint8Array(binary.length);
-                  for (let index = 0; index < binary.length; index++) {
-                    bytes[index] = binary.charCodeAt(index);
-                  }
-                  const transfer = new DataTransfer();
-                  transfer.items.add(new File([bytes], 'opengamemate-screen.png', { type: 'image/png' }));
-                  const pasteEvent = new ClipboardEvent('paste', {
-                    bubbles: true,
-                    cancelable: true,
-                    composed: true,
-                    clipboardData: transfer
-                  });
-                  if (!pasteEvent.clipboardData) {
-                    Object.defineProperty(pasteEvent, 'clipboardData', { value: transfer });
-                  }
-                  composers[0].dispatchEvent(pasteEvent);
-                  await new Promise(resolve => setTimeout(resolve, 350));
-                  return { code: 'paste-event-dispatched', fileSelected: false };
-                })()
-                """);
+            throw;
         }
-        else
+        catch (Exception exception) when (IsAdapterException(exception))
         {
-            return new(false, false, false, GetCode(locateFileInput), WebAdapterStatus.AdapterInvalid);
+            return new(false, false, false, "attachment-runtime-failed", WebAdapterStatus.AdapterInvalid);
         }
-
-        var inputFileSelected = false;
-        var inputTextInserted = false;
-        if (insertText)
-        {
-            var inputResult = await InsertTextAsync(message!, composerSelectorJson);
-            inputFileSelected = GetBoolean(inputResult, "fileSelected");
-            inputTextInserted = GetBoolean(inputResult, "textInserted");
-        }
-
-        await Task.Delay(750, cancellationToken);
-        var messageJson = JsonSerializer.Serialize(message ?? string.Empty);
-        var expectTextJson = insertText ? "true" : "false";
-        var probeResult = await EvaluateAsync(
-            $$"""
-            (() => {
-              const fileInput = document.querySelector('input[{{FileInputMarker}}="true"]');
-              const composer = document.querySelector({{composerSelectorJson}});
-              const scope = composer?.closest('form') ?? document;
-              const previewSelectors = {{previewSelectorsJson}};
-              const quotaSelectors = {{quotaSelectorsJson}};
-              const platformErrorSelectors = {{platformErrorSelectorsJson}};
-              const actual = composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement
-                ? composer.value
-                : composer?.innerText;
-              return {
-                code: 'ok',
-                fileSelected: fileInput?.files?.length === 1,
-                previewDetected: previewSelectors.some(selector => scope.querySelector(selector)) ||
-                  Boolean(scope.querySelector('img[src^="blob:"]')),
-                textInserted: {{expectTextJson}} && actual === {{messageJson}},
-                quotaDetected: quotaSelectors.some(selector => document.querySelector(selector)),
-                platformErrorDetected: platformErrorSelectors.some(selector => document.querySelector(selector))
-              };
-            })()
-            """);
-
-        var fileSelected = GetBoolean(probeResult, "fileSelected") ||
-            inputFileSelected ||
-            GetBoolean(attachmentResult, "fileSelected");
-        var previewDetected = GetBoolean(probeResult, "previewDetected");
-        var textInserted = GetBoolean(probeResult, "textInserted") ||
-            inputTextInserted;
-        var status = ClassifyPreparationProbe(
-            fileSelected || previewDetected,
-            insertText ? textInserted : true,
-            GetBoolean(probeResult, "quotaDetected"),
-            GetBoolean(probeResult, "platformErrorDetected"));
-        return new(
-            fileSelected,
-            previewDetected,
-            textInserted,
-            $"{attachmentMethod}:{GetCode(attachmentResult)}:{GetCode(probeResult)}",
-            status);
     }
 
     public async Task<TextPreparationResult> PrepareTextAsync(
-        string message,
-        CancellationToken cancellationToken = default)
+        string message, CancellationToken cancellationToken = default)
     {
-        if (!_session.IsInitialized || !_session.IsOnChatGpt())
-        {
-            return new(false, "not-on-chatgpt", WebAdapterStatus.NotReady);
-        }
-
-        if (!IsMessageValid(message))
-        {
-            return new(false, "message-invalid", WebAdapterStatus.InvalidInput);
-        }
-
-        try
-        {
-            var composerSelectorJson = JsonSerializer.Serialize(_rules.ComposerSelector);
-            var result = await InsertTextAsync(message, composerSelectorJson);
-            var inserted = GetBoolean(result, "textInserted");
-            return new(
-                inserted,
-                GetCode(result),
-                inserted ? WebAdapterStatus.Succeeded : WebAdapterStatus.AdapterInvalid);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (
-            exception is InvalidOperationException or JsonException or IOException or
-                UnauthorizedAccessException or COMException)
-        {
-            return new(false, "adapter-operation-failed", WebAdapterStatus.AdapterInvalid);
-        }
-    }
-
-    public async Task<AdapterIdleProbeResult> ProbeIdleAsync(
-        CancellationToken cancellationToken = default)
-    {
-        if (!_session.IsInitialized || !_session.IsOnChatGpt())
-        {
-            return CreateIdleProbeFailure("not-on-chatgpt", WebAdapterStatus.NotReady);
-        }
-
+        if (!IsMessageValid(message)) return new(false, "message-invalid", WebAdapterStatus.InvalidInput);
+        if (!IsReady()) return new(false, "not-on-chatgpt", WebAdapterStatus.NotReady);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var sendButtonSelectorJson = JsonSerializer.Serialize(_rules.SendButtonSelector);
-            var busyButtonSelectorJson = JsonSerializer.Serialize(_rules.BusyButtonSelector);
-            var composerSelectorJson = JsonSerializer.Serialize(_rules.ComposerSelector);
-            var attachmentPreviewSelectorsJson = JsonSerializer.Serialize(
-                _rules.AttachmentPreviewSelectors);
-            var result = await EvaluateAsync(
-                $$"""
-                (() => {
-                  const domainCorrect = location.hostname === 'chatgpt.com' ||
-                    location.hostname.endsWith('.chatgpt.com');
-                  if (!domainCorrect) {
-                    return { code: 'unexpected-origin', domainCorrect: false,
-                      composerCount: 0, stopButtonCount: 0, sendButtonCount: 0,
-                      sendButtonDisabled: false, sendButtonInComposerForm: false,
-                      diagnostics: { pageState: 'Unknown', detectedButtonCount: 0,
-                        candidateButtons: [], failureStage: 'Readiness' } };
-                  }
+            if (!_imagePrepared)
+            {
+                _operationId = Guid.NewGuid().ToString("N");
+                var begin = await EvaluateActionAsync("begin");
+                if (ReadBoundedString(begin, "method", 32) is null || IsPlatformBlocked(begin))
+                {
+                    return new(false, GetCode(begin), PreparationFailureStatus(begin), ParseAdapterDiagnostics(begin));
+                }
+            }
+            var result = await EvaluateActionAsync("text", message: message);
+            var inserted = GetBoolean(result, "textInserted");
+            return new(inserted, GetCode(result), inserted && !IsPlatformBlocked(result)
+                ? WebAdapterStatus.Succeeded : PreparationFailureStatus(result), ParseAdapterDiagnostics(result));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAdapterException(exception))
+        {
+            return new(false, "text-runtime-failed", WebAdapterStatus.AdapterInvalid);
+        }
+    }
 
-                  const composers = [...document.querySelectorAll({{composerSelectorJson}})]
-                    .filter(element => !element.hasAttribute('disabled'));
-                  const composer = composers.length === 1 ? composers[0] : null;
-                  const form = composer?.closest('form') ?? null;
-                  const stopButtons = [...document.querySelectorAll({{busyButtonSelectorJson}})];
-                  const sendButtons = form
-                    ? [...form.querySelectorAll({{sendButtonSelectorJson}})]
-                    : [];
-                  const sendDisabled = sendButtons.length === 1 &&
-                    (sendButtons[0].disabled ||
-                      sendButtons[0].getAttribute('aria-disabled') === 'true');
-                  const attachmentSelectors = {{attachmentPreviewSelectorsJson}};
-                  const hasAttachment = Boolean(form) &&
-                    (attachmentSelectors.some(selector => form.querySelector(selector)) ||
-                      Boolean(form.querySelector('img[src^="blob:"]')));
-                  const activeVoiceSelector =
-                    'button[data-testid="end-voice-mode-button"],' +
-                    '[data-testid="voice-mode-composer"]';
-                  const hasVoiceControl = Boolean(document.querySelector(activeVoiceSelector));
-                  const pageState = hasVoiceControl
-                    ? (hasAttachment ? 'VoiceComposerWithAttachment' : 'VoiceComposer')
-                    : (hasAttachment ? 'ComposerWithAttachment' : 'Composer');
-                  const allFormButtons = form ? [...form.querySelectorAll('button')] : [];
-                  const activeVoiceButtons = [...document.querySelectorAll(
-                    'button[data-testid="end-voice-mode-button"],' +
-                    '[data-testid="voice-mode-composer"] button')];
-                  const diagnosticButtons = [...new Set([...allFormButtons, ...activeVoiceButtons])];
-                  const candidateButtons = diagnosticButtons.length > 0
-                    ? diagnosticButtons
-                      .slice(0, {{MaximumDiagnosticButtonCandidates}})
-                      .map(button => ({
-                        tagName: button.tagName.toLowerCase(),
-                        scopeDepth: 0,
-                        type: button.getAttribute('type'),
-                        role: button.getAttribute('role'),
-                        disabled: Boolean(button.disabled),
-                        ariaDisabled: button.getAttribute('aria-disabled') === 'true',
-                        ariaLabel: button.getAttribute('aria-label'),
-                        dataTestId: button.getAttribute('data-testid')
-                      }))
-                    : [];
-                  const failureStage = composers.length !== 1 || !form
-                    ? 'ComposerScope'
-                    : sendButtons.length > 1 || stopButtons.length > 1
-                      ? 'ButtonValidation'
-                      : sendButtons.length !== 1
-                        ? 'ButtonDiscovery'
-                        : 'None';
-                  const code = composers.length !== 1
-                    ? 'composer-count-idle-probe'
-                    : !form
-                      ? 'composer-form-missing-idle-probe'
-                      : stopButtons.length !== 0
-                        ? 'stop-button-present'
-                        : sendButtons.length !== 1
-                          ? 'send-button-count-idle-probe'
-                          : sendDisabled
-                            ? 'send-button-disabled-idle-probe'
-                            : 'ok';
-                  return {
-                    code,
-                    domainCorrect: true,
-                    composerCount: composers.length,
-                    stopButtonCount: stopButtons.length,
-                    sendButtonCount: sendButtons.length,
-                    sendButtonDisabled: sendDisabled,
-                    sendButtonInComposerForm: Boolean(form) && sendButtons.length === 1,
-                    diagnostics: {
-                      pageState,
-                      detectedButtonCount: diagnosticButtons.length,
-                      candidateButtons,
-                      failureStage
-                    }
-                  };
-                })()
-                """);
-
+    public async Task<AdapterIdleProbeResult> ProbeIdleAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsReady()) return IdleFailure("not-on-chatgpt", WebAdapterStatus.NotReady);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = await EvaluateActionAsync("idle");
+            var diagnostics = ParseAdapterDiagnostics(result);
             var composerCount = GetInt32(result, "composerCount");
-            var stopButtonCount = GetInt32(result, "stopButtonCount");
-            var sendButtonCount = GetInt32(result, "sendButtonCount");
-            var domainCorrect = GetBoolean(result, "domainCorrect");
-            var sendDisabled = GetBoolean(result, "sendButtonDisabled");
-            var sendInForm = GetBoolean(result, "sendButtonInComposerForm");
-            var status = composerCount > 1 || stopButtonCount > 1 || sendButtonCount > 1 ||
-                         GetCode(result) == "composer-form-missing-idle-probe"
-                ? WebAdapterStatus.AdapterInvalid
-                : domainCorrect && composerCount == 1 && stopButtonCount == 0 &&
-                  sendButtonCount == 1 && !sendDisabled && sendInForm
-                    ? WebAdapterStatus.Succeeded
-                    : WebAdapterStatus.NotReady;
-            return new(
-                domainCorrect,
-                composerCount,
-                stopButtonCount,
-                sendButtonCount,
-                sendDisabled,
-                sendInForm,
-                GetCode(result),
-                status,
-                ParseAdapterDiagnostics(result));
+            var stops = GetInt32(result, "stopButtonCount");
+            var sends = GetInt32(result, "sendButtonCount");
+            var invalid = composerCount != 1 || stops > 1 || sends > 1;
+            var empty = GetBoolean(result, "composerEmpty");
+            var status = invalid ? WebAdapterStatus.AdapterInvalid
+                : stops == 0 && sends == 1 && !GetBoolean(result, "sendButtonDisabled")
+                    ? WebAdapterStatus.Succeeded : WebAdapterStatus.NotReady;
+            return new(GetBoolean(result, "domainCorrect"), composerCount, stops, sends,
+                GetBoolean(result, "sendButtonDisabled"), GetBoolean(result, "sendButtonInComposerForm"),
+                GetCode(result), status, diagnostics, empty);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception exception) when (
-            exception is InvalidOperationException or JsonException or IOException or
-                UnauthorizedAccessException or COMException)
+        catch (Exception exception) when (IsAdapterException(exception))
         {
-            return CreateIdleProbeFailure("adapter-operation-failed", WebAdapterStatus.AdapterInvalid);
+            return IdleFailure("idle-runtime-failed", WebAdapterStatus.AdapterInvalid);
         }
     }
 
-    private static AdapterIdleProbeResult CreateIdleProbeFailure(
-        string code,
-        WebAdapterStatus status) =>
-        new(
-            false,
-            0,
-            0,
-            0,
-            false,
-            false,
-            code,
-            status,
-            new AdapterDiagnostics(
-                AdapterPageState.Unknown,
-                0,
-                [],
-                AdapterFailureStage.Readiness));
+    public Task<SubmissionResult> SubmitAsync(CancellationToken cancellationToken = default) =>
+        SubmitCoreAsync(PollAttempts, null, TimeSpan.Zero, null, cancellationToken);
 
-    public async Task<SubmissionResult> SubmitAsync(CancellationToken cancellationToken = default)
+    public Task<SubmissionResult> SubmitPreparedInputOnceAsync(long expectedAudioStateVersion,
+        TimeSpan requiredSilentDuration, AdapterPageState expectedPageState,
+        CancellationToken cancellationToken = default) =>
+        SubmitCoreAsync(1, expectedAudioStateVersion, requiredSilentDuration, expectedPageState, cancellationToken);
+
+    private async Task<SubmissionResult> SubmitCoreAsync(int pollAttempts, long? expectedAudioStateVersion,
+        TimeSpan requiredSilentDuration, AdapterPageState? expectedPageState, CancellationToken cancellationToken)
     {
+        var invocationAttempted = false;
+        AdapterDiagnostics? diagnostics = null;
         try
         {
-            return await SubmitCoreAsync(
-                SubmitControlPollAttempts,
-                expectedAudioStateVersion: null,
-                requiredSilentDuration: TimeSpan.Zero,
-                expectedPageState: null,
-                cancellationToken);
+            if (!IsReady()) return new(false, false, false, "not-on-chatgpt", WebAdapterStatus.NotReady);
+            if (_operationId is null) return new(false, false, false, "no-prepared-input", WebAdapterStatus.AdapterInvalid);
+            var invoked = false;
+            for (var attempt = 0; attempt < pollAttempts; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!AudioAllowsSubmit(expectedAudioStateVersion, requiredSilentDuration))
+                {
+                    return new(false, false, false, "audio-busy-before-submit", WebAdapterStatus.NotReady);
+                }
+                var control = await EvaluateActionAsync("control", expectedPageState: expectedPageState);
+                diagnostics = ParseAdapterDiagnostics(control);
+                if (IsPlatformBlocked(control)) return SubmissionFailure(control, false);
+                if (GetCode(control) != "ok") return SubmissionFailure(control, false);
+                var decision = GetBoolean(control, "uploading") ? SubmitControlDecision.Wait
+                    : DetermineSubmitControlDecision(GetInt32(control, "sendButtonCount"),
+                        GetBoolean(control, "sendDisabled"), GetInt32(control, "busyButtonCount"));
+                if (decision == SubmitControlDecision.Fail)
+                {
+                    return new(false, false, false, "send-control-ambiguous", WebAdapterStatus.AdapterInvalid, diagnostics);
+                }
+                if (decision == SubmitControlDecision.Invoke)
+                {
+                    if (!AudioAllowsSubmit(expectedAudioStateVersion, requiredSilentDuration))
+                    {
+                        return new(false, false, false, "audio-changed-before-invoke", WebAdapterStatus.NotReady, diagnostics);
+                    }
+                    invocationAttempted = true;
+                    var invocation = await EvaluateActionAsync("invoke", expectedPageState: expectedPageState);
+                    invoked = GetBoolean(invocation, "invoked");
+                    if (!invoked) return SubmissionFailure(invocation, false);
+                    break;
+                }
+                await Task.Delay(PollIntervalMilliseconds, cancellationToken);
+            }
+            if (!invoked) return new(false, false, false, "send-not-ready", WebAdapterStatus.NotReady, diagnostics);
+
+            for (var attempt = 0; attempt < PollAttempts; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var observed = await EvaluateActionAsync("post");
+                if (IsPlatformBlocked(observed)) return SubmissionFailure(observed, true);
+                if (GetCode(observed) is not ("submission-observed" or "submission-pending")) break;
+                if (GetBoolean(observed, "consumed"))
+                {
+                    _imagePrepared = false;
+                    return new(true, GetBoolean(observed, "composerCleared"),
+                        GetBoolean(observed, "attachmentCleared"), "submission-observed",
+                        WebAdapterStatus.Succeeded, ParseAdapterDiagnostics(observed));
+                }
+                await Task.Delay(PollIntervalMilliseconds, cancellationToken);
+            }
+            return UnknownSubmission(diagnostics);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && invocationAttempted)
+        {
+            return UnknownSubmission(diagnostics);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception exception) when (
-            exception is InvalidOperationException or JsonException or IOException or
-                UnauthorizedAccessException or COMException)
+        catch (Exception exception) when (IsAdapterException(exception))
         {
-            return new(
-                false,
-                false,
-                false,
-                "adapter-operation-failed",
-                WebAdapterStatus.AdapterInvalid,
-                new AdapterDiagnostics(
-                    AdapterPageState.Unknown,
-                    0,
-                    [],
-                    AdapterFailureStage.RuntimeEvaluation));
+            return invocationAttempted ? UnknownSubmission(diagnostics)
+                : new(false, false, false, "submit-runtime-failed", WebAdapterStatus.AdapterInvalid, diagnostics);
         }
     }
 
-    public async Task<SubmissionResult> SubmitPreparedInputOnceAsync(
-        long expectedAudioStateVersion,
-        TimeSpan requiredSilentDuration,
-        AdapterPageState expectedPageState,
-        CancellationToken cancellationToken = default)
+    private bool IsReady() => _session.IsInitialized && _session.IsOnChatGpt();
+
+    private bool AudioAllowsSubmit(long? expectedVersion, TimeSpan requiredSilence)
     {
-        try
-        {
-            return await SubmitCoreAsync(
-                pollAttempts: 1,
-                expectedAudioStateVersion,
-                requiredSilentDuration,
-                expectedPageState,
-                cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (
-            exception is InvalidOperationException or JsonException or IOException or
-                UnauthorizedAccessException or COMException)
-        {
-            return new(
-                false,
-                false,
-                false,
-                "adapter-operation-failed",
-                WebAdapterStatus.AdapterInvalid,
-                new AdapterDiagnostics(
-                    AdapterPageState.Unknown,
-                    0,
-                    [],
-                    AdapterFailureStage.RuntimeEvaluation));
-        }
+        var audio = _session.GetAudioSnapshot(DateTimeOffset.UtcNow);
+        return audio.IsKnown && !audio.IsPlaying &&
+            (expectedVersion is null || audio.Version == expectedVersion.Value && audio.SilentDuration >= requiredSilence);
     }
 
-    private async Task<SubmissionResult> SubmitCoreAsync(
-        int pollAttempts,
-        long? expectedAudioStateVersion,
-        TimeSpan requiredSilentDuration,
-        AdapterPageState? expectedPageState,
-        CancellationToken cancellationToken)
+    private async Task<JsonElement> EvaluateActionAsync(string action, bool requireImage = false,
+        string? message = null, string? imageBase64 = null, AdapterPageState? expectedPageState = null)
     {
-        if (!_session.IsInitialized || !_session.IsOnChatGpt())
+        if (!IsReady()) throw new InvalidOperationException("The adapter left the allowed origin.");
+        var request = JsonSerializer.Serialize(new
         {
-            return new(
-                false,
-                false,
-                false,
-                "not-on-chatgpt",
-                WebAdapterStatus.NotReady,
-                new AdapterDiagnostics(
-                    AdapterPageState.Unknown,
-                    0,
-                    [],
-                    AdapterFailureStage.Readiness));
-        }
-
-        var sendButtonSelectorJson = JsonSerializer.Serialize(_rules.SendButtonSelector);
-        var busyButtonSelectorJson = JsonSerializer.Serialize(_rules.BusyButtonSelector);
-        var composerSelectorJson = JsonSerializer.Serialize(_rules.ComposerSelector);
-        var quotaSelectorsJson = JsonSerializer.Serialize(_rules.QuotaErrorSelectors);
-        var platformErrorSelectorsJson = JsonSerializer.Serialize(_rules.PlatformErrorSelectors);
-        var attachmentPreviewSelectorsJson = JsonSerializer.Serialize(_rules.AttachmentPreviewSelectors);
-        var requireAttachmentJson = expectedAudioStateVersion is null ? "false" : "true";
-        var expectedPageStateJson = expectedPageState is null
-            ? "null"
-            : JsonSerializer.Serialize(expectedPageState.Value.ToString());
-
-        var adapterDiagnostics = new AdapterDiagnostics(
-            AdapterPageState.Unknown,
-            0,
-            [],
-            AdapterFailureStage.Readiness);
-        var triggerInvoked = false;
-        var submitCode = "send-control-timeout";
-        for (var attempt = 0; attempt < pollAttempts; attempt++)
+            action,
+            rules = _rules,
+            operationId = _operationId,
+            requireImage,
+            message,
+            imageBase64,
+            expectedPageState = expectedPageState?.ToString()
+        });
+        using var response = await CallCdpAsync("Runtime.evaluate", new
         {
-            if (expectedAudioStateVersion is not null &&
-                !AudioGuardAllowsSubmit(expectedAudioStateVersion.Value, requiredSilentDuration))
-            {
-                return new(
-                    false,
-                    false,
-                    false,
-                    "audio-state-changed-before-submit",
-                    WebAdapterStatus.NotReady,
-                    adapterDiagnostics);
-            }
-
-            var controlResult = await EvaluateAsync(
-                $$"""
-            (() => {
-              const emptyDiagnostics = failureStage => ({
-                pageState: 'Unknown', detectedButtonCount: 0,
-                candidateButtons: [], failureStage
-              });
-              if (!(location.hostname === 'chatgpt.com' || location.hostname.endsWith('.chatgpt.com'))) {
-                return { code: 'unexpected-origin',
-                  sendButtonCount: 0, sendDisabled: false, busyButtonCount: 0,
-                  diagnostics: emptyDiagnostics('Readiness') };
-              }
-
-              const composers = [...document.querySelectorAll({{composerSelectorJson}})]
-                .filter(element => !element.hasAttribute('disabled'));
-              if (composers.length !== 1) {
-                return { code: 'composer-count-before-submit',
-                  sendButtonCount: 0, sendDisabled: false, busyButtonCount: 0,
-                  diagnostics: emptyDiagnostics('ComposerScope') };
-              }
-
-              const composer = composers[0];
-              const scope = composer.closest('form');
-              if (!scope) {
-                return { code: 'composer-form-missing',
-                  sendButtonCount: 0, sendDisabled: false, busyButtonCount: 0,
-                  diagnostics: emptyDiagnostics('ComposerScope') };
-              }
-
-              const attachmentSelectors = {{attachmentPreviewSelectorsJson}};
-              const hasAttachment = attachmentSelectors.some(selector => scope.querySelector(selector)) ||
-                Boolean(scope.querySelector('img[src^="blob:"]'));
-              const distanceFromScope = element => {
-                const scopeAncestors = new Map();
-                let current = scope;
-                let distance = 0;
-                while (current && distance <= {{MaximumDiagnosticScopeDepth}}) {
-                  scopeAncestors.set(current, distance++);
-                  current = current.parentElement;
-                }
-                current = element;
-                distance = 0;
-                while (current && distance <= {{MaximumDiagnosticScopeDepth}}) {
-                  if (scopeAncestors.has(current)) return distance + scopeAncestors.get(current);
-                  current = current.parentElement;
-                  distance++;
-                }
-                return {{MaximumDiagnosticScopeDepth + 1}};
-              };
-              const allButtons = [...scope.querySelectorAll('button')];
-              const discoveredButtons = allButtons.map(button => ({ button, scopeDepth: 0 }));
-              const seenButtons = new Set(allButtons);
-              for (const button of document.querySelectorAll(
-                {{busyButtonSelectorJson}} + ',' + {{sendButtonSelectorJson}})) {
-                const scopeDepth = distanceFromScope(button);
-                if (scopeDepth <= {{MaximumDiagnosticScopeDepth}} && !seenButtons.has(button)) {
-                  seenButtons.add(button);
-                  discoveredButtons.push({ button, scopeDepth });
-                }
-              }
-              const busyButtons = [...document.querySelectorAll({{busyButtonSelectorJson}})]
-                .filter(button => distanceFromScope(button) <= {{MaximumDiagnosticScopeDepth}});
-              const hasVoiceControl = busyButtons.length === 1 || Boolean(scope.querySelector(
-                'button[data-testid="voice-mode-button"],button[data-testid="end-voice-mode-button"],' +
-                '[data-testid="voice-mode-composer"]'));
-              const pageState = hasVoiceControl
-                ? (hasAttachment ? 'VoiceComposerWithAttachment' : 'VoiceComposer')
-                : (hasAttachment ? 'ComposerWithAttachment' : 'Composer');
-              const candidateButtons = discoveredButtons
-                .slice(0, {{MaximumDiagnosticButtonCandidates}})
-                .map(({ button, scopeDepth }) => ({
-                  tagName: button.tagName.toLowerCase(),
-                  scopeDepth,
-                  type: button.getAttribute('type'),
-                  role: button.getAttribute('role'),
-                  disabled: Boolean(button.disabled),
-                  ariaDisabled: button.getAttribute('aria-disabled') === 'true',
-                  ariaLabel: button.getAttribute('aria-label'),
-                  dataTestId: button.getAttribute('data-testid')
-                }));
-              const diagnostics = failureStage => ({
-                pageState,
-                detectedButtonCount: discoveredButtons.length,
-                candidateButtons,
-                failureStage
-              });
-              const buttons = allButtons.filter(button => button.matches({{sendButtonSelectorJson}}));
-              const sendDisabled = buttons.length === 1 &&
-                (buttons[0].disabled || buttons[0].getAttribute('aria-disabled') === 'true');
-              return {
-                code: 'ok',
-                sendButtonCount: buttons.length,
-                sendDisabled,
-                busyButtonCount: busyButtons.length,
-                hasAttachment,
-                diagnostics: diagnostics('None')
-              };
-            })()
-            """);
-
-            adapterDiagnostics = ParseAdapterDiagnostics(controlResult);
-            var sendButtonCount = GetInt32(controlResult, "sendButtonCount");
-            var busyButtonCount = GetInt32(controlResult, "busyButtonCount");
-            if (!HasExpectedPageState(adapterDiagnostics.PageState, expectedPageState))
-            {
-                return new(
-                    false,
-                    false,
-                    false,
-                    "page-state-changed-before-submit",
-                    WebAdapterStatus.NotReady,
-                    adapterDiagnostics with { FailureStage = AdapterFailureStage.ButtonValidation });
-            }
-
-            if (expectedAudioStateVersion is not null &&
-                !GetBoolean(controlResult, "hasAttachment"))
-            {
-                return new(
-                    false,
-                    false,
-                    false,
-                    "attachment-missing-before-submit",
-                    WebAdapterStatus.AdapterInvalid,
-                    adapterDiagnostics with { FailureStage = AdapterFailureStage.ButtonValidation });
-            }
-
-            var decision = DetermineSubmitControlDecision(
-                sendButtonCount,
-                GetBoolean(controlResult, "sendDisabled"),
-                busyButtonCount);
-            if (GetCode(controlResult) != "ok")
-            {
-                return new(
-                    false,
-                    false,
-                    false,
-                    GetCode(controlResult),
-                    WebAdapterStatus.AdapterInvalid,
-                    adapterDiagnostics);
-            }
-
-            if (decision == SubmitControlDecision.Fail)
-            {
-                var failureStage = sendButtonCount > 1 || busyButtonCount > 1
-                    ? AdapterFailureStage.ButtonValidation
-                    : AdapterFailureStage.ButtonDiscovery;
-                return new(
-                    false,
-                    false,
-                    false,
-                    "send-control-ambiguous",
-                    WebAdapterStatus.AdapterInvalid,
-                    adapterDiagnostics with { FailureStage = failureStage });
-            }
-
-            if (decision == SubmitControlDecision.Invoke)
-            {
-                if (expectedAudioStateVersion is not null &&
-                    !AudioGuardAllowsSubmit(expectedAudioStateVersion.Value, requiredSilentDuration))
-                {
-                    return new(
-                        false,
-                        false,
-                        false,
-                        "audio-state-changed-before-invoke",
-                        WebAdapterStatus.NotReady,
-                        adapterDiagnostics with { FailureStage = AdapterFailureStage.ButtonValidation });
-                }
-
-                var invokeResult = await EvaluateAsync(
-                    $$"""
-                    (() => {
-                      const composers = [...document.querySelectorAll({{composerSelectorJson}})]
-                        .filter(element => !element.hasAttribute('disabled'));
-                      if (composers.length !== 1) return { code: 'composer-count-before-invoke', invoked: false };
-                      const scope = composers[0].closest('form');
-                      if (!scope) return { code: 'composer-form-missing-before-invoke', invoked: false };
-                      const busyButtons = [...document.querySelectorAll({{busyButtonSelectorJson}})];
-                      const buttons = [...scope.querySelectorAll({{sendButtonSelectorJson}})];
-                      const attachmentSelectors = {{attachmentPreviewSelectorsJson}};
-                      const hasAttachment = attachmentSelectors.some(selector => scope.querySelector(selector)) ||
-                        Boolean(scope.querySelector('img[src^="blob:"]'));
-                      const hasVoiceControl = busyButtons.length === 1 || Boolean(scope.querySelector(
-                        'button[data-testid="voice-mode-button"],button[data-testid="end-voice-mode-button"],' +
-                        '[data-testid="voice-mode-composer"]'));
-                      const pageState = hasVoiceControl
-                        ? (hasAttachment ? 'VoiceComposerWithAttachment' : 'VoiceComposer')
-                        : (hasAttachment ? 'ComposerWithAttachment' : 'Composer');
-                      const expectedPageState = {{expectedPageStateJson}};
-                      if (expectedPageState !== null && pageState !== expectedPageState) {
-                        return { code: 'page-state-changed-before-invoke', invoked: false };
-                      }
-                      if ({{requireAttachmentJson}} && !hasAttachment) {
-                        return { code: 'attachment-missing-before-invoke', invoked: false };
-                      }
-                      if (busyButtons.length !== 0 || buttons.length !== 1) {
-                        return { code: 'send-control-changed-before-invoke', invoked: false };
-                      }
-                      const button = buttons[0];
-                      if (button.disabled || button.getAttribute('aria-disabled') === 'true') {
-                        return { code: 'send-button-disabled-before-invoke', invoked: false };
-                      }
-                      button.click();
-                      return { code: 'ok', invoked: true };
-                    })()
-                    """);
-                triggerInvoked = GetBoolean(invokeResult, "invoked");
-                submitCode = GetCode(invokeResult);
-                if (!triggerInvoked)
-                {
-                    var invokeStatus = submitCode == "page-state-changed-before-invoke"
-                        ? WebAdapterStatus.NotReady
-                        : WebAdapterStatus.AdapterInvalid;
-                    return new(
-                        false,
-                        false,
-                        false,
-                        submitCode,
-                        invokeStatus,
-                        adapterDiagnostics with { FailureStage = AdapterFailureStage.Invocation });
-                }
-
-                break;
-            }
-
-            if (attempt == pollAttempts - 1)
-            {
-                return new(
-                    false,
-                    false,
-                    false,
-                    expectedAudioStateVersion is null
-                        ? submitCode
-                        : "conversation-busy-before-submit",
-                    expectedAudioStateVersion is null
-                        ? WebAdapterStatus.AdapterInvalid
-                        : WebAdapterStatus.NotReady,
-                    adapterDiagnostics with { FailureStage = AdapterFailureStage.ButtonValidation });
-            }
-
-            await Task.Delay(SubmitControlPollIntervalMilliseconds, cancellationToken);
-        }
-
-        await Task.Delay(1000, cancellationToken);
-        var stateResult = await EvaluateAsync(
-            $$"""
-            (() => {
-              const composer = document.querySelector({{composerSelectorJson}});
-              const fileInput = document.querySelector('input[{{FileInputMarker}}="true"]');
-              const quotaSelectors = {{quotaSelectorsJson}};
-              const platformErrorSelectors = {{platformErrorSelectorsJson}};
-              const text = composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement
-                ? composer.value
-                : composer?.innerText;
-              return {
-                code: 'ok',
-                composerCleared: !text,
-                attachmentCleared: !fileInput || !fileInput.files || fileInput.files.length === 0,
-                quotaDetected: quotaSelectors.some(selector => document.querySelector(selector)),
-                platformErrorDetected: platformErrorSelectors.some(selector => document.querySelector(selector))
-              };
-            })()
-            """);
-
-        var quotaDetected = GetBoolean(stateResult, "quotaDetected");
-        var platformErrorDetected = GetBoolean(stateResult, "platformErrorDetected");
-        var composerCleared = GetBoolean(stateResult, "composerCleared");
-        var attachmentCleared = GetBoolean(stateResult, "attachmentCleared");
-        var status = quotaDetected
-            ? WebAdapterStatus.QuotaReached
-            : platformErrorDetected
-                ? WebAdapterStatus.PlatformError
-                : composerCleared || attachmentCleared
-                    ? WebAdapterStatus.Succeeded
-                    : WebAdapterStatus.AdapterInvalid;
-        var code = status switch
-        {
-            WebAdapterStatus.QuotaReached => "quota-detected",
-            WebAdapterStatus.PlatformError => "platform-error-detected",
-            WebAdapterStatus.AdapterInvalid => "submission-state-not-observed",
-            _ => GetCode(stateResult),
-        };
-
-        return new(
-            triggerInvoked,
-            composerCleared,
-            attachmentCleared,
-            code,
-            status,
-            status == WebAdapterStatus.Succeeded
-                ? adapterDiagnostics
-                : adapterDiagnostics with { FailureStage = AdapterFailureStage.PostSubmitObservation });
-    }
-
-    private bool AudioGuardAllowsSubmit(
-        long expectedAudioStateVersion,
-        TimeSpan requiredSilentDuration)
-    {
-        var snapshot = _session.GetAudioSnapshot(DateTimeOffset.UtcNow);
-        return snapshot.IsKnown &&
-               !snapshot.IsPlaying &&
-               snapshot.Version == expectedAudioStateVersion &&
-               snapshot.SilentDuration >= requiredSilentDuration;
-    }
-
-    public static bool HasExpectedPageState(
-        AdapterPageState currentPageState,
-        AdapterPageState? expectedPageState) =>
-        expectedPageState is null || currentPageState == expectedPageState;
-
-    private async Task<JsonElement> EvaluateAsync(string expression)
-    {
-        using var response = await CallCdpAsync(
-            "Runtime.evaluate",
-            new { expression, returnByValue = true, awaitPromise = true });
+            expression = $"({ComposerScript.Value})({request})",
+            returnByValue = true,
+            awaitPromise = true,
+        });
         return ParseRuntimeEvaluateResponse(response.RootElement);
     }
 
-    private async Task<JsonElement> InsertTextAsync(string message, string composerSelectorJson)
-    {
-        var messageJson = JsonSerializer.Serialize(message);
-        return await EvaluateAsync(
-            $$"""
-            (() => {
-              const fileInput = document.querySelector('input[{{FileInputMarker}}="true"]');
-              const composers = [...document.querySelectorAll({{composerSelectorJson}})]
-                .filter(element => !element.hasAttribute('disabled'));
-              if (composers.length !== 1) {
-                return { code: 'composer-count', count: composers.length,
-                  fileSelected: fileInput?.files?.length === 1, textInserted: false };
-              }
-
-              const composer = composers[0];
-              const text = {{messageJson}};
-              if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
-                const prototype = composer instanceof HTMLTextAreaElement
-                  ? HTMLTextAreaElement.prototype
-                  : HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-                if (!setter) return { code: 'native-value-setter-missing', fileSelected: true, textInserted: false };
-                setter.call(composer, text);
-              } else if (composer.isContentEditable) {
-                const paragraph = document.createElement('p');
-                paragraph.textContent = text;
-                composer.replaceChildren(paragraph);
-              } else {
-                return { code: 'unsupported-composer',
-                  fileSelected: fileInput?.files?.length === 1, textInserted: false };
-              }
-
-              composer.dispatchEvent(new InputEvent('input', {
-                bubbles: true,
-                inputType: 'insertText',
-                data: text
-              }));
-              const actual = composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement
-                ? composer.value
-                : composer.innerText;
-              return {
-                code: 'ok',
-                fileSelected: fileInput?.files?.length === 1,
-                textInserted: actual === text
-              };
-            })()
-            """);
-    }
+    private static bool IsAdapterException(Exception exception) =>
+        exception is InvalidOperationException or JsonException or IOException or UnauthorizedAccessException or COMException;
 
     private static bool IsMessageValid(string message) =>
         !string.IsNullOrWhiteSpace(message) && message.Length <= MaximumMessageCharacters;
 
-    public static WebAdapterStatus ClassifyPreparationProbe(
-        bool imageAdded,
-        bool textInserted,
-        bool quotaDetected,
-        bool platformErrorDetected)
+    private static bool IsPlatformBlocked(JsonElement result) =>
+        GetBoolean(result, "quotaDetected") || GetBoolean(result, "platformErrorDetected");
+
+    private static WebAdapterStatus PreparationFailureStatus(JsonElement result) =>
+        GetBoolean(result, "quotaDetected") ? WebAdapterStatus.QuotaReached
+        : GetBoolean(result, "platformErrorDetected") ? WebAdapterStatus.PlatformError
+        : GetCode(result) is "composer-draft-present" or "composer-attachment-present" or "conversation-busy"
+            ? WebAdapterStatus.NotReady : WebAdapterStatus.AdapterInvalid;
+
+    private static InputPreparationResult ImageResult(JsonElement result, WebAdapterStatus status) =>
+        new(GetBoolean(result, "fileSelected"), GetBoolean(result, "previewDetected"), false,
+            GetCode(result), status, ParseAdapterDiagnostics(result));
+
+    private static SubmissionResult SubmissionFailure(JsonElement result, bool invoked) =>
+        new(invoked, false, false, GetCode(result), PreparationFailureStatus(result), ParseAdapterDiagnostics(result));
+
+    private static SubmissionResult UnknownSubmission(AdapterDiagnostics? diagnostics) =>
+        new(true, false, false, "submission-outcome-unknown", WebAdapterStatus.OutcomeUnknown, diagnostics);
+
+    private static AdapterIdleProbeResult IdleFailure(string code, WebAdapterStatus status) =>
+        new(false, 0, 0, 0, false, false, code, status,
+            new(AdapterPageState.Unknown, 0, [], AdapterFailureStage.Readiness));
+
+    public static bool HasExpectedPageState(AdapterPageState currentPageState, AdapterPageState? expectedPageState) =>
+        expectedPageState is null || currentPageState == expectedPageState;
+
+    public static WebAdapterStatus ClassifyPreparationProbe(bool imageAdded, bool textInserted,
+        bool quotaDetected, bool platformErrorDetected) =>
+        quotaDetected ? WebAdapterStatus.QuotaReached : platformErrorDetected ? WebAdapterStatus.PlatformError
+            : imageAdded && textInserted ? WebAdapterStatus.Succeeded : WebAdapterStatus.AdapterInvalid;
+
+    public static SubmitControlDecision DetermineSubmitControlDecision(int sendButtonCount,
+        bool sendButtonDisabled, int busyButtonCount)
     {
-        if (quotaDetected)
-        {
-            return WebAdapterStatus.QuotaReached;
-        }
-
-        if (platformErrorDetected)
-        {
-            return WebAdapterStatus.PlatformError;
-        }
-
-        return imageAdded && textInserted
-            ? WebAdapterStatus.Succeeded
-            : WebAdapterStatus.AdapterInvalid;
+        if (sendButtonCount is < 0 or > 1 || busyButtonCount is < 0 or > 1) return SubmitControlDecision.Fail;
+        if (busyButtonCount == 1 || sendButtonCount == 1 && sendButtonDisabled) return SubmitControlDecision.Wait;
+        return sendButtonCount == 1 ? SubmitControlDecision.Invoke : SubmitControlDecision.Fail;
     }
-
-    public static SubmitControlDecision DetermineSubmitControlDecision(
-        int sendButtonCount,
-        bool sendButtonDisabled,
-        int busyButtonCount)
-    {
-        if (sendButtonCount is < 0 or > 1 || busyButtonCount is < 0 or > 1)
-        {
-            return SubmitControlDecision.Fail;
-        }
-
-        if (busyButtonCount == 1 || (sendButtonCount == 1 && sendButtonDisabled))
-        {
-            return SubmitControlDecision.Wait;
-        }
-
-        return sendButtonCount == 1
-            ? SubmitControlDecision.Invoke
-            : SubmitControlDecision.Fail;
-    }
-
     public static JsonElement ParseRuntimeEvaluateResponse(string responseJson)
     {
         using var response = JsonDocument.Parse(responseJson);

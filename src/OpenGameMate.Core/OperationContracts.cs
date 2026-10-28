@@ -104,6 +104,16 @@ public sealed record AdapterIdleProbeResult(
         !SendButtonDisabled &&
         SendButtonInComposerForm &&
         Status == WebAdapterStatus.Succeeded;
+
+    // Explicit opt-in only. The original idle-driven policy still excludes Voice.
+    // The periodic caller must additionally verify stable WebView output silence
+    // and preserve the Voice/page state through attachment and submission.
+    public bool IsSafeToPrepareForPeriodic =>
+        (Status is WebAdapterStatus.Succeeded or WebAdapterStatus.NotReady) &&
+        (IsSafeToPrepare ||
+         (DomainCorrect && ComposerEmpty && ComposerCount == 1 && StopButtonCount == 0 &&
+          SendButtonCount is 0 or 1 && (SendButtonCount == 0 || SendButtonInComposerForm) &&
+          Diagnostics.PageState == AdapterPageState.VoiceComposer));
 }
 
 public sealed record TextPreparationResult(

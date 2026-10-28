@@ -18,6 +18,11 @@ public enum CaptureFailureCode
     TemporaryFileFailure,
     GraphicsDeviceFailure,
     Unknown,
+    TargetNotSelected,
+    TargetUnavailable,
+    TargetMinimized,
+    TargetAmbiguous,
+    SourceChanged,
 }
 
 public sealed class ScreenCaptureException : Exception

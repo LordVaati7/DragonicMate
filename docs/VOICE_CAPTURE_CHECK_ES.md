@@ -1,104 +1,60 @@
-# Dragonic Mate: comprobación breve del envío durante Voice
+# Dragonic Mate: prueba de captura exclusiva de Kenshi
 
-Esta es una compilación experimental del adaptador. La interfaz todavía se llama
-OpenGameMate. No incluye captura exclusiva de Kenshi ni contexto de campaña.
-
-Esta revisión reconoce miniaturas `data:image/` y el botón `submit` dentro del
-formulario del compositor. Rechaza botones ambiguos o dirigidos a otro formulario,
-adjuntos previos e imágenes que no hayan cargado. No corrige Silero VAD.
-
-## Probar solo imágenes cuando Voice web no funciona
-
-Este modo prueba únicamente captura y envío al chat de texto; no demuestra que
-Voice funcione ni que el juego conserve el foco. El automático queda desactivado
-incluso sin el argumento `--manual-only`.
-
-1. Extrae el paquete actualizado en una carpeta nueva fuera del repositorio.
-2. Abre `Start-Image-Check.cmd`. El título debe incluir `Image test (no Voice)`.
-3. Pulsa `Open ChatGPT`, inicia sesión y abre un chat nuevo para evitar el adjunto
-   residual de una prueba anterior. Deja la página en modo texto, con Voice
-   cerrado y el compositor vacío. El botón X azul de ChatGPT cierra Voice si quedó abierto.
-4. En el panel izquierdo pulsa `Confirm image test (no Voice)` y después `Start`.
-   No se registra ninguna confirmación de Voice: el evento es `image-check.user-confirmed`.
-5. Usa una escena inocua: todavía se captura todo el monitor principal. Cierra
-   información privada y pulsa `Send now` una sola vez.
-6. Comprueba visualmente si aparece exactamente una imagen en la conversación.
-   Puedes preguntar por texto qué muestra. El programa no lee la respuesta.
-7. Pulsa `Stop` y comunica si llegó la imagen o exporta el diagnóstico si falla.
-   No repitas inmediatamente un envío no confirmado ni una operación con adjuntos residuales.
-
-El modo normal y `Start-Voice-Check.cmd` siguen requiriendo confirmación real de
-Voice. El modo de imágenes no corrige el error de descarga de Silero VAD.
-
-## Qué está validado y qué falta
-
-GitHub Actions compila en Windows y prueba reglas, estados y páginas sintéticas.
-Esas pruebas no demuestran compatibilidad con el ChatGPT real, Voice, el foco del
-juego, el rendimiento ni la refrigeración de tu computadora. El resultado sigue
-pendiente hasta la comprobación manual siguiente.
-
-El paquete es autocontenido para .NET 8: no requiere instalar su SDK ni su runtime.
-WebView2 Runtime debe existir previamente. Si falta, detén la comprobación; no hace
-falta instalar herramientas para continuar esta investigación.
+Esta versión experimental añade selección de una ventana de Kenshi. La interfaz
+se llama OpenGameMate y el título incluye `Kenshi window`. El envío de imagen y
+la conversación por Voice juntos ya tienen una primera validación del usuario
+en la versión anterior. La captura de Kenshi, foco y rendimiento siguen pendientes.
 
 ## Preparación
 
-1. Descarga el artefacto `DragonicMate-voice-diagnostic-win-x64` de una ejecución
-   correcta de CI en la rama de reparación. Extrae el ZIP fuera del repositorio.
-2. No ejecutes scripts de instalación, compilación ni pruebas de estrés.
-3. Abre `Start-Voice-Check.cmd`. Este lanzador solo inicia la aplicación con
-   `--portable --manual-only`: datos aislados en esa carpeta y automático desactivado.
-   No instala herramientas. Si abres el EXE directamente, no se aplica ese modo.
-4. La captura actual abarca **todo el monitor principal**. Cierra documentos,
-   conversaciones y notificaciones privadas. Usa primero una escena inocua con
-   formas de colores que puedas describir; todavía no necesitas iniciar Kenshi.
-5. Abre ChatGPT desde la aplicación, inicia sesión tú mismo, abre Voice y confirma
-   Voice en el panel de la aplicación. El perfil aislado puede pedir otro inicio
-   de sesión aunque tu navegador habitual ya esté conectado.
+1. Extrae el nuevo ZIP en una carpeta nueva. Con ambas versiones cerradas puedes
+   copiar `data` de la versión anterior, en el mismo usuario y equipo, para conservar
+   la sesión. No compartas ni publiques esa carpeta.
+2. Abre `Start-Voice-Check.cmd`. No requiere instalar herramientas ni compilar.
+3. Abre Kenshi en ventana o sin bordes. Usa una escena tranquila que ya tengas
+   disponible; no cambies ajustes gráficos ni hagas pruebas de carga. Mantén la
+   ventana abierta, sin minimizar. Esta prueba es opcional si el portátil está caliente.
+4. En GameMate pulsa **Select Kenshi window**. Debe aparecer **Kenshi selected**.
+   Solo se admiten nombres de proceso exactos `kenshi_x64` o `kenshi`. Si no encuentra
+   exactamente una ventana válida, se detiene; no elige otra aplicación ni el escritorio.
+5. Abre ChatGPT, activa Voice, conversa brevemente y confirma Voice en el panel.
+6. Pulsa **Start** y acepta la confirmación de captura exclusiva de Kenshi.
 
-## Una imagen, con control del usuario
+## Una captura desde GameMate
 
-1. Antes de activar el modo compañero, deja una frase de prueba en el compositor
-   y comprueba que el envío de rol se detiene sin reemplazarla. Retírala tú mismo.
-2. Inicia el modo compañero y confirma que la actividad indica `Manual validation
-   mode`. Usa una vez el atajo configurado cuando Voice esté en silencio. Detén el
-   modo compañero al terminar el intento. En este modo no hay envíos automáticos.
-3. Comprueba visualmente que hay exactamente una imagen en la conversación y
-   pregunta por las formas o colores de la escena. Escucha la respuesta y confirma
-   que Voice sigue abierto. El programa no lee ni registra esa respuesta.
-4. Si funciona, repite en dos intentos breves separados, deteniendo el modo
-   compañero después de cada uno. No prolongues la sesión ni pruebes límites.
-5. Si muestra `Send unconfirmed`, `Web adapter failed`, cuota o un borrador/adjunto
-   residual, detente y revisa la conversación antes de volver a enviar. No pulses
-   repetidamente Enviar. Retira tú mismo cualquier borrador residual.
+1. Deja GameMate delante, cubriendo parte del juego. No minimices Kenshi.
+2. Pulsa **Send now** una sola vez y espera hasta 40 segundos.
+3. Confirma que la imagen enviada contiene el juego y no GameMate ni el escritorio.
+   Pregunta por voz qué aparece; confirma que puedes seguir conversando.
+4. Pulsa **Stop**. No se enviarán imágenes periódicas: esta versión siempre es manual,
+   incluso al abrir el EXE directamente. El intervalo de espera queda desactivado.
 
-Si el equipo presenta problemas de refrigeración, interrumpe la comprobación. No
-se requiere una sesión de juego ni una prueba prolongada para este primer paso.
+Si el juego se minimiza al cambiar de aplicación, usa ventana o sin bordes antes de
+seleccionarlo otra vez. El programa no restaura ventanas ni fuerza el foco. Una
+imagen negra puede indicar que el juego dejó de renderizar o una limitación de captura;
+no se intentará eludir protecciones. Detén la prueba y exporta el diagnóstico si falla.
 
-## Información útil para el siguiente diagnóstico
+## Comprobación posterior del foco, solo si la anterior funciona
 
-Comunica solo: si la imagen aparece, si Voice continúa, si el foco cambió y el
-código de error. El botón de exportación genera diagnósticos de estados y controles;
-revisa su contenido antes de compartirlos. No publiques imágenes, conversaciones,
-documentos de Dragonic Army ni el directorio `data/WebView2`.
+Con Voice activo y Kenshi delante, solicita una captura con el atajo configurado
+(ahora Ctrl+Alt+F10; puede cambiarse con Change). Comprueba que GameMate no aparece
+delante y que los controles del juego siguen funcionando. Esto es distinto de pulsar
+Send now: al pulsar ese botón tú mismo das el foco a GameMate. Después pulsa Stop.
+No hace falta repetir capturas ni mantener una sesión larga para esta comprobación.
 
-Los eventos nuevos son `adapter.input-preparation`, `adapter.image-preparation`,
-`adapter.text-preparation` y `adapter.role-preparation`. Distinguen borrador,
-compositor, entradas ambiguas, espera de adjunto y resultado desconocido.
+## Límites y privacidad
 
-No se instalan modelos locales ni se utilizan servicios de IA facturados por API.
-Se aplican las capacidades y límites normales de tu cuenta ChatGPT.
-
-## Si hay varias entradas de archivo o Voice no carga
-
-El adaptador deja intactas las entradas de archivo cuando hay varias asociadas al
-formulario. Intenta una sola operación de pegado dirigida al compositor visible
-único y exige una vista previa antes de preparar texto o enviar. Un pegado que no
-produce adjunto termina con `attachment-ready-timeout`, sin escoger otro control.
-
-Si aparece `Silero VAD failed to load` también en Edge o Chrome, detén la prueba
-de capturas: la carga de Voice debe funcionar primero en el navegador habitual.
-Ese mensaje por sí solo no distingue un fallo del recurso de ChatGPT de un
-problema de red, caché o filtrado. No reinstales herramientas ni desactives el
-antivirus para comprobarlo. Una recarga sin caché y una comprobación breve usando
-otra conexión de confianza permiten acotar el problema.
+- Selección válida solo para la ejecución actual. Detén el modo antes de reseleccionar.
+- Ventana ausente, cerrada, minimizada o con identidad distinta: falla sin capturar el monitor.
+- La captura usa Windows Graphics Capture sobre la ventana, no memoria del juego,
+  inyección, entradas simuladas ni una API de IA adicional.
+- La imagen temporal conserva proporción y tiene como máximo 1920 x 1080 píxeles.
+- Cualquier contenido privado que el juego dibuje dentro de su ventana puede incluirse.
+- El programa no lee respuestas, historial, credenciales ni audio. Los diagnósticos no
+  incluyen imágenes, títulos de ventana, rutas de procesos ni documentos de campaña.
+- CI valida compilación, estados y páginas sintéticas; no ejecuta Kenshi ni demuestra
+  refrigeración, foco o captura real del juego. No se hicieron compilaciones o pruebas
+  de carga en tu portátil.
+- Si reaparece Silero VAD, detén la prueba. No se modifican ni eluden sus recursos.
+- `Start-Image-Check.cmd` permite el mismo ensayo de ventana sin Voice, con confirmación
+  explícita de prueba de imagen. No verifica Voice.

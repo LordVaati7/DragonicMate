@@ -36,7 +36,7 @@ public partial class MainWindow : Window
     private readonly bool _imageCheckOnly;
     private readonly IAppSettingsStore _settingsStore;
     private readonly IDiagnosticLogger _logger;
-    private readonly IPrimaryDisplayCapture _capture;
+    private readonly KenshiWindowCapture _capture;
     private readonly GameMateStateMachine _stateMachine;
     private readonly AutomaticSendLoop _automaticSendLoop = new();
     private readonly AutomaticPendingSendSlot _automaticPendingSendSlot = new();
@@ -66,11 +66,11 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
         _imageCheckOnly = imageCheckOnly;
-        _manualOnly = manualOnly || imageCheckOnly;
+        _manualOnly = true; // Validate window capture only on explicit request.
         _stateMachine = new GameMateStateMachine(imageTestEnabled: imageCheckOnly);
         _settingsStore = new JsonAppSettingsStore(paths.SettingsFile);
         _logger = new JsonLineDiagnosticLogger(paths.LogsDirectory);
-        _capture = new PrimaryDisplayCapture(paths.TemporaryDirectory);
+        _capture = new KenshiWindowCapture(paths.TemporaryDirectory);
         _submissionCoordinator = new SubmissionCoordinator(DispatchSubmissionAsync);
         InitializeComponent();
     }
@@ -438,6 +438,7 @@ public partial class MainWindow : Window
                 "Sign in to ChatGPT, leave Voice closed, empty the composer, then confirm the image test.");
             ConfirmVoiceButton.Content = T("确认图片测试（无 Voice）", "Confirm image test (no Voice)");
         }
+        ApplyKenshiCaptureLabels();
         BrowserPaneTitleText.Text = "ChatGPT";
         BrowserPaneCaptionText.Text = T(
             "内嵌网页 · 登录与 Voice 由你控制",
@@ -822,40 +823,7 @@ public partial class MainWindow : Window
         BeginRun(resetConversationTracker: true);
     }
 
-    private async Task<bool> ConfirmPrivacyBeforeFirstCaptureAsync()
-    {
-        if (!_settings.ShowPrivacyWarningOnFirstStart)
-        {
-            return true;
-        }
-
-        var result = MessageBox.Show(
-            this,
-            _manualOnly ? T(
-                "此模式只在你点击立即发送或按快捷键时捕获整个主显示器，并发送到当前 ChatGPT 对话。画面可能包含私人内容；请先关闭敏感窗口。不会自动截图。\n\n是否理解风险并开始？",
-                "This mode captures the entire primary display and sends it to the current ChatGPT chat only when you select Send now or press the hotkey. The image may contain private content; close sensitive windows first. Automatic capture is disabled.\n\nDo you understand the risk and want to start?") : T(
-                $"OpenGameMate 会在 ChatGPT 网页音频停止且页面空闲连续稳定 {_settings.ConversationIdleDelaySeconds} 秒后，才捕获整个主显示器并发送到当前对话。画面可能包含通知、聊天、账号名或其他私人内容。请先关闭敏感窗口。独占全屏、受保护内容和反作弊环境可能黑屏或失败，程序不会绕过保护。\n\n是否理解风险并开始？",
-                $"OpenGameMate captures the entire primary display only after ChatGPT web audio stops and the page remains idle for {_settings.ConversationIdleDelaySeconds} seconds, then sends it to the current chat. Notifications, chats, account names, or other private content may be included. Close sensitive windows first. Exclusive fullscreen, protected content, and anti-cheat environments may fail or produce black frames; protections are not bypassed.\n\nDo you understand the risk and want to start?"),
-            T("整屏捕获隐私确认", "Full-display capture privacy confirmation"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-        if (result != MessageBoxResult.Yes)
-        {
-            return false;
-        }
-
-        _settings = _settings with { ShowPrivacyWarningOnFirstStart = false };
-        try
-        {
-            await _settingsStore.SaveAsync(_settings);
-        }
-        catch (Exception exception)
-        {
-            await ReportExceptionAsync("settings.save-failed", "privacy-setting", exception);
-        }
-
-        return true;
-    }
+    private Task<bool> ConfirmPrivacyBeforeFirstCaptureAsync() => Task.FromResult(ConfirmKenshiCapture());
 
     private void BeginRun(bool resetConversationTracker)
     {
@@ -1792,7 +1760,8 @@ public partial class MainWindow : Window
         SendFullRoleButton.IsEnabled = canSendRole;
         SendShortRoleButton.IsEnabled = canSendRole;
         NewConversationButton.IsEnabled = state is GameMateState.Ready or GameMateState.Running or GameMateState.Paused;
-        StartButton.IsEnabled = state == GameMateState.Ready && !_auxiliaryOperation;
+        StartButton.IsEnabled = state == GameMateState.Ready && !_auxiliaryOperation && _capture.HasSelectedWindow;
+        SelectKenshiButton.IsEnabled = !_auxiliaryOperation && state is not (GameMateState.Running or GameMateState.Sending or GameMateState.Paused);
         SendNowButton.IsEnabled = state == GameMateState.Running;
         PauseResumeButton.IsEnabled = state is GameMateState.Running or GameMateState.Paused;
         PauseResumeButton.Content = state == GameMateState.Paused
@@ -1812,6 +1781,10 @@ public partial class MainWindow : Window
                 GameMateState.Stopped => T("已停止；再次确认图片测试可重新开始。", "Stopped; confirm the image test again to restart."),
                 _ => RunStatusText.Text,
             };
+        }
+        if (_manualOnly && state == GameMateState.Running)
+        {
+            RunStatusText.Text = T("只在请求时捕获已选择的 Kenshi 窗口。", "Ready: Send now captures the selected Kenshi window only. No periodic capture.");
         }
         IdleDelayComboBox.IsEnabled = !_manualOnly;
 

@@ -4,7 +4,8 @@ OpenGameMate v0.1.0 is designed to minimize retained data.
 
 ## What the application processes
 
-- The primary display, only after the user explicitly starts companion mode.
+- Only the explicitly selected Kenshi window, after the user starts companion mode
+  and requests a screenshot. This experimental revision disables periodic capture.
 - A single temporary PNG used for the current submission attempt.
 - User-selected role text and fixed automatic/manual screenshot prompts.
 - Local operational settings and privacy-safe diagnostic events.
@@ -16,7 +17,15 @@ OpenGameMate does not read ChatGPT replies, conversation history, account detail
 
 ## Screenshots
 
-Capturing the entire primary display can include notifications, chat windows, account names, or other private information. The application shows a warning before first start. One known temporary PNG is atomically replaced and removed after each attempt. A crash does not restore the prior screenshot or running state.
+Window capture can include private content rendered inside Kenshi. The application
+requires explicit window selection and confirmation before capture. Selection is
+not persisted. A missing, closed, changed, or minimized target fails without a
+desktop fallback. The capture item remains bound to the selected window lifetime.
+Process identity is checked through operating-system metadata; no game memory,
+window titles, process paths, or credentials are read or logged. One known temporary
+PNG is atomically replaced and removed after each attempt. A crash does not restore
+the prior screenshot or running state. The reusable primary-display backend remains
+in the library, but the application uses only the Kenshi-window capture service.
 
 ## Diagnostics
 

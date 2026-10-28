@@ -61,6 +61,7 @@ jobs:
           Copy-Item docs/VOICE_CAPTURE_CHECK_ES.md -Destination artifacts/voice-diagnostic/LEEME.md
           Copy-Item scripts/Start-Voice-Check.cmd -Destination artifacts/voice-diagnostic
           Copy-Item scripts/Start-Image-Check.cmd -Destination artifacts/voice-diagnostic
+          Copy-Item scripts/Start-Kenshi.cmd -Destination artifacts/voice-diagnostic
           .\scripts\Validate-Privacy.ps1 -ArtifactPath artifacts/voice-diagnostic
       - name: Upload experimental package for user-controlled validation
         uses: actions/upload-artifact@v4
